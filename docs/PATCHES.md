@@ -1,7 +1,35 @@
-# Patches for V10.45 (ME-34172 standard program cassette)
+# Patches for V10.45 and V10.50 (ME-34172 standard program cassette)
 
 All patches are applied to a 32 KiB image with a valid checksum (the byte sum is 0 mod 256). Each one checks
 the bytes it replaces, uses only free filler (0xFF) and fixes the checksum at F7FF. They can be combined.
+
+## Firmware versions
+
+`patches/profiles.py` lists, per version, the addresses of every hook site and every firmware routine the
+patches call. They were found by matching instruction patterns between the images with the absolute
+addresses masked; every site matched uniquely (12 instructions). RAM, XRAM and bit addresses (flags, the
+temperature count at XRAM 7047, the EEPROM mirror at 7600) are the same in both versions, and the XRAM and
+ROM areas the patches use are unused in both.
+
+| | V10.45 | V10.50 |
+|---|---|---|
+| A/D window (interrupt ticks, per weighing pass) | 24 (0.160 s) | 20 (0.133 s) |
+| comparator hook `CC11` (normaliser) | CC11 | CB22 |
+| temperature call / routine | 827B / C887 | 8275 / C7E7 |
+| pass tail | 8876 | 886A |
+| bar-up dispatch / stage 1 | 831A / 8395 | 830E / 8389 |
+| wake: arms start-up | 836E | 8362 |
+| calibration timeouts (passes) | 93B6: 48, 9AB0: 72 | 91AE: 64, 99CD: 96 |
+| free ROM | E72E..FF7F | E6C6..FF7F |
+
+Differences that matter:
+
+* The window is shorter in V10.50. The comparator converts its restart threshold (120 mg) with the window
+  length, and the temperature line's default interval is 75 passes against 62, both about 10 s. The comparator
+  ring holds the same number of windows, so its averaging time is 0.83 times as long as in V10.45.
+* The V10.50 temperature routine sets error code 4 on a range failure without raising the error display flag.
+* V10.50 has the resolution-aware interrupt filter ladder. It is not part of the patches and the simulator does
+  not model the interrupt filter, so the settling behaviour of the combination is untested.
 
 ## Memory map used
 

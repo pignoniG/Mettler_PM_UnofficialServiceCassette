@@ -26,12 +26,12 @@ user manual; fitted = line 70D1.7 low) is fitted at power-on.
 Usage:  rom_comparator.py IN.BIN OUT.BIN [-n 63] [--reset-mg 120] [--raw-per-g 1548] [--jumper]
 """
 import argparse
+import profiles
 
 CODE_AT = 0xF000
 CHECKSUM_AT = 0xF7FF
-HOOK_AT, HOOK_OLD = 0xCC11, bytes([0x85, 0x32, 0xF0])        # MOV B,32h -> LJMP HOOK
-# calibration/stability timeouts: MOV 26h,#n counted down once per display pass, Err 1 at zero
-CAL_TIMEOUTS = {0x93B6: 0x30, 0x9AB0: 0x48}
+# the hook (MOV B,32h -> LJMP HOOK) and the calibration/stability timeouts (MOV 26h,#n counted down once per
+# display pass, Err 1 at zero) are at version-specific addresses: see profiles.py
 
 RING = 0x7682                     # 63 slots x 2 bytes up to 76FF (7680 is the EEPROM pointer)
 NMAX = (0x7700 - RING) // 2
@@ -181,7 +181,7 @@ def program(table, reset_units, jumper):
     marker_check('INIT')
     dptr(MODE); I('MOVX', 'A', '@DPTR'); I('JNZ', 'RUN')
     L('STOCK', 'MOV', 'DPTR', '#%d' % SAVE_R0); I('MOVX', 'A', '@DPTR'); I('MOV', 'R0', 'A')
-    I('MOV', 'B', 0x32); I('LJMP', 'CC14')
+    I('MOV', 'B', 0x32); I('LJMP', 'RESUME')
     if jumper:
         L('INIT', 'MOV', 'DPTR', '#%d' % 0x70D1); I('MOVX', 'A', '@DPTR')
         I('CPL', 'A'); I('RL', 'A'); I('ANL', 'A', '#1')
@@ -359,24 +359,26 @@ def program(table, reset_units, jumper):
     return P
 
 
-def units_per_mg(raw_per_g):
+def units_per_mg(raw_per_g, window=24):
     # raw = (S>>8) * 10 / 256  ->  one raw unit is 25.6 units of S>>8
-    return raw_per_g / 1000 * 25.6
+    return raw_per_g / 1000 * 256 * window / 240          # 25.6 for the 24-tick window of V10.45
 
 
-def build(img, table=DEFAULT_TABLE, reset_mg=120, raw_per_g=1548, jumper=False, cal_passes=150):
+def build(img, table=DEFAULT_TABLE, reset_mg=120, raw_per_g=1548, jumper=False, cal_passes=150, profile=None):
     img = bytearray(img)
     if len(img) != 0x8000: raise ValueError("expected a 32 KiB ROM image")
     if sum(img) & 0xFF: raise ValueError("ROM checksum of the input is already wrong")
-    if img[HOOK_AT - 0x8000:HOOK_AT - 0x8000 + 3] != HOOK_OLD:
-        raise ValueError("unexpected bytes at CC11: not the stock V10.45 image")
-    reset_units = round(reset_mg * units_per_mg(raw_per_g))
-    code, lab = assemble(CODE_AT, program(table, reset_units, jumper), {'CC14': 0xCC14})
+    P = profiles.get(bytes(img), profile)
+    hook, resume = P['comp_hook'], P['comp_resume']
+    if img[hook - 0x8000:hook - 0x8000 + 3] != P['comp_hook_old']:
+        raise ValueError(f"unexpected bytes at {hook:04X}: not the stock image of this version")
+    reset_units = round(reset_mg * units_per_mg(raw_per_g, P['window']))
+    code, lab = assemble(CODE_AT, program(table, reset_units, jumper), {'RESUME': resume})
     o = CODE_AT - 0x8000
     if any(b != 0xFF for b in img[o:o + len(code)]) or CODE_AT + len(code) > CHECKSUM_AT:
         raise ValueError("patch area is not free filler")
     img[o:o + len(code)] = code
-    for at, n0 in CAL_TIMEOUTS.items():
+    for at, n0 in P['cal_timeouts'].items():
         o2 = at - 0x8000
         if img[o2:o2 + 3] != bytes([0x75, 0x26, n0]):
             raise ValueError(f"unexpected bytes at {at:04X}")
@@ -384,7 +386,7 @@ def build(img, table=DEFAULT_TABLE, reset_mg=120, raw_per_g=1548, jumper=False, 
             assert 1 <= cal_passes <= 255
             img[o2 + 2] = max(n0, cal_passes)
     h = lab['HOOK']
-    img[HOOK_AT - 0x8000:HOOK_AT - 0x8000 + 3] = bytes([0x02, h >> 8, h & 0xFF])
+    img[hook - 0x8000:hook - 0x8000 + 3] = bytes([0x02, h >> 8, h & 0xFF])
     img[CHECKSUM_AT - 0x8000] = 0
     img[CHECKSUM_AT - 0x8000] = (-sum(img)) & 0xFF
     assert sum(img) & 0xFF == 0
@@ -398,13 +400,14 @@ def main():
                    help='per vibration-adapter setting 0..3: KxN = K windows per slot, N slots')
     p.add_argument('--reset-mg', type=float, default=120, help='restart the average above this change')
     p.add_argument('--raw-per-g', type=float, default=1548, help='raw units per gram (PM4600: 1548)')
+    p.add_argument('--version', choices=sorted(profiles.PROFILES), help='firmware version (default: detect)')
     p.add_argument('--jumper', action='store_true', help='on only with the cassette jumper fitted')
     p.add_argument('--cal-passes', type=int, default=150,
                    help='calibration/stability timeouts in display passes (stock 48 and 72; 0 = stock)')
     a = p.parse_args()
     table = tuple(tuple(int(v) for v in e.split('x')) for e in a.table.split(','))
     assert len(table) == 4, 'four settings'
-    out, lab, code, ru = build(open(a.inp, 'rb').read(), table, a.reset_mg, a.raw_per_g, a.jumper, a.cal_passes)
+    out, lab, code, ru = build(open(a.inp, 'rb').read(), table, a.reset_mg, a.raw_per_g, a.jumper, a.cal_passes, a.version)
     open(a.out, 'wb').write(out)
     print(f"patch {CODE_AT:04X}-{CODE_AT + len(code) - 1:04X} ({len(code)} bytes), table {a.table}, "
           f"restart above {a.reset_mg:g} mg ({ru} units), {'jumper' if a.jumper else 'always on'}, "

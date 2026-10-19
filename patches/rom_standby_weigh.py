@@ -26,13 +26,14 @@ that woke the balance is not taken as a tare; the start-up's own tare request (2
 Memory: code at E980 (free filler); XRAM 70F0 state, 70F1..70F5 saved poll state, 70F6 saved key
 events, 70F7 first-wake flag, 70F8 inhibit counter.
 
-Usage:  rom_standby_weigh.py IN.BIN OUT.BIN [--skip-startup] [--poll-weigh] [--diag | --diag2]
+Usage:  rom_standby_weigh.py IN.BIN OUT.BIN [--skip-startup] [--poll-weigh] [--diag | --diag2] [--version 10.45|10.50]
 --diag   markers in standby: 'P' before the weighing part and 'W' after it through the firmware output
          routine, and 'D' written straight to the UART (to see which part of the serial path is closed)
 --diag2  also a status line 'Q 29 20 2F 27 D1 F0' (hex flags and switch input) at the top of every tail
 """
 import sys
 import asm51
+import profiles
 import rom_temperature as rt
 
 CODE_AT = 0xE980
@@ -42,13 +43,7 @@ INHIB_PASSES = 20                    # about 3 s: covers the press that woke the
 FLAG3 = 0x70F7                       # set after the first wake-up since power-on
 CHECKSUM_AT = 0xF7FF
 POLL_STATE = (0x25, 0x26, 0x64, 0x65, 0x66)   # internal RAM the standby poll keeps between passes
-PATCHES = {   # address: (expected old bytes)
-    0x830E: bytes([0x20, 0x4E, 0x18]),
-    0x831A: bytes([0x02, 0x83, 0x95]),
-
-    0x8876: bytes([0x12, 0xC4, 0x64, 0xC2, 0x0A, 0x02, 0x82, 0x78]),
-    0x83AE: bytes([0xD2, 0x38]),
-}
+# the places patched and the stock bytes expected there come from profiles.py (poll, bar_up, tail, stage1_setb, wake, normal)
 
 
 def encode(m, ops, pc, labels):
@@ -81,30 +76,30 @@ def assemble(org, prog):
     return bytes(code), labels
 
 
-def program(diag=False, skip_startup=False, poll_weigh=False):
-    P = []
-    def I(*ins): P.append((None,) + ins)
-    def L(label, *ins): P.append((label,) + ins)
+def program(P, diag=False, skip_startup=False, poll_weigh=False):
+    prog = []
+    def I(*ins): prog.append((None,) + ins)
+    def L(label, *ins): prog.append((label,) + ins)
     # ---- replaces LJMP 8395 at 831A: the bar is up (display off).  The bar stays up in standby, so this
     #      stage-1 code runs on every pass.  Mark state 3 and run it; its end reaches 8876 -> TAIL.
     L('HOOK1', 'JB', 0x7F, 'ST1')                            # 2Fh.7 set: leave it to the original code
     I('CLRBIT', 0x38)                                        # interface on while the bar is up (stage 2 / the poll set it again, as stock)
     I('MOV', 'DPTR', '#%d' % FLAG); I('MOV', 'A', '#3'); I('MOVX', '@DPTR', 'A')
-    L('ST1', 'LJMP', 0x8395)
+    L('ST1', 'LJMP', P['stage1'])
     # ---- replaces JB 29h.6,8329 at 830E: standby poll (bar down again) -> poll first (state 1)
     L('HOOK2', 'JNB', 0x4E, 'ORIG')                          # not standby: the original next test
     I('MOV', 'DPTR', '#%d' % FLAG); I('MOV', 'A', '#1'); I('MOVX', '@DPTR', 'A')
-    I('LJMP', 0x8329)                                        # the standby poll sees bar events first
-    L('ORIG', 'LJMP', 0x8311)
+    I('LJMP', P['poll_jump'])                                        # the standby poll sees bar events first
+    L('ORIG', 'LJMP', P['poll_next'])
     # ---- replaces LCALL C464 ... at 8876 (every path ends here)
     if diag == 2:                                            # status line at the top of every tail: Q 29 20 2F 27 D1 F0
-        L('TAIL', 'MOV', 'A', '#81'); I('LCALL', 0xD6FC)
+        L('TAIL', 'MOV', 'A', '#81'); I('LCALL', P['putc'])
         for kind, addr in (('r', 0x29), ('r', 0x20), ('r', 0x2F), ('r', 0x27), ('x', 0x70D1), ('x', FLAG)):
-            I('MOV', 'A', '#32'); I('LCALL', 0xD6FC)
+            I('MOV', 'A', '#32'); I('LCALL', P['putc'])
             if kind == 'r': I('MOV', 'A', addr)
             else: I('MOV', 'DPTR', '#%d' % addr); I('MOVX', 'A', '@DPTR')
             I('LCALLL', 'PUTHEX')
-        I('MOV', 'A', '#13'); I('LCALL', 0xD6FC); I('MOV', 'A', '#10'); I('LCALL', 0xD6FC)
+        I('MOV', 'A', '#13'); I('LCALL', P['putc']); I('MOV', 'A', '#10'); I('LCALL', P['putc'])
         I('MOV', 'DPTR', '#%d' % FLAG); I('MOVX', 'A', '@DPTR'); I('JZ', 'NORM')
     else:
         L('TAIL', 'MOV', 'DPTR', '#%d' % FLAG); I('MOVX', 'A', '@DPTR'); I('JZ', 'NORM')
@@ -114,16 +109,16 @@ def program(diag=False, skip_startup=False, poll_weigh=False):
     I('JNB', 0x4E, 'CLEAR')                                  # state 1: the poll woke the balance -> normal tail
     L('DOW', 'MOV', 'A', '#2'); I('MOVX', '@DPTR', 'A')
     if diag:
-        I('MOV', 'A', '#80'); I('LCALL', 0xD6FC)             # 'P' = about to weigh in standby
-        I('MOV', 'A', '#13'); I('LCALL', 0xD6FC)
-        I('MOV', 'A', '#10'); I('LCALL', 0xD6FC)
+        I('MOV', 'A', '#80'); I('LCALL', P['putc'])             # 'P' = about to weigh in standby
+        I('MOV', 'A', '#13'); I('LCALL', P['putc'])
+        I('MOV', 'A', '#10'); I('LCALL', P['putc'])
         I('MOV', 'DPTR', '#%d' % FLAG)
     for reg in POLL_STATE:                                    # keep the poll's state: the weighing path uses
         I('INC', 'DPTR'); I('MOV', 'A', reg); I('MOVX', '@DPTR', 'A')   # 25h/26h as flags and 65h as the filter depth
     I('INC', 'DPTR'); I('MOV', 'A', 0x2E); I('MOVX', '@DPTR', 'A')           # key events (2Eh: bit 0 = tare switch pressed):
     I('MOV', 0x2E, '#0')                                      # the weighing path must not see them while the display is off
     I('MOV', 0x25, '#0'); I('MOV', 0x26, '#0')
-    I('LJMP', 0x8314)
+    I('LJMP', P['normal'])
     # the weighing part is done -> blank the display as standby entry does
     L('WDONE', 'MOV', 'DPTR', '#%d' % (FLAG + 1))
     for k, reg in enumerate(POLL_STATE):
@@ -131,71 +126,82 @@ def program(diag=False, skip_startup=False, poll_weigh=False):
         I('MOVX', 'A', '@DPTR'); I('MOV', reg, 'A')
     I('INC', 'DPTR'); I('MOVX', 'A', '@DPTR'); I('ORLDA', 0x2E)  # give the key events back (OR: new edges from the interrupt stay)
     I('MOV', 'DPTR', '#%d' % 0x717A); I('CLR', 'A'); I('MOVX', '@DPTR', 'A')
-    I('LCALL', 0xCD93)                                       # A = 0
-    I('MOV', 'A', '#64'); I('LCALL', 0xBB2B)
+    I('LCALL', P['cd93'])                                       # A = 0
+    I('MOV', 'A', '#64'); I('LCALL', P['bb2b'])
     if diag:
-        I('MOV', 'A', '#87'); I('LCALL', 0xD6FC)             # 'W' = weighing part done
-        I('MOV', 'A', '#13'); I('LCALL', 0xD6FC)
-        I('MOV', 'A', '#10'); I('LCALL', 0xD6FC)
+        I('MOV', 'A', '#87'); I('LCALL', P['putc'])             # 'W' = weighing part done
+        I('MOV', 'A', '#13'); I('LCALL', P['putc'])
+        I('MOV', 'A', '#10'); I('LCALL', P['putc'])
     L('CLEAR', 'MOV', 'DPTR', '#%d' % FLAG); I('CLR', 'A'); I('MOVX', '@DPTR', 'A')
-    L('NORM', 'LCALL', 0xC464); I('CLRBIT', 0x0A); I('LJMP', 0x8278)
+    L('NORM', 'LCALL', P['flush']); I('CLRBIT', 0x0A); I('LJMP', P['tail_cont'])
     if skip_startup:
         # replaces SETB 29h.5 / CLR 20h.3 / LJMP 8416 at 836E (end of the wake-up init, where the start-up sequence is
         # armed).  The first wake after power-on keeps the start-up; later wakes do what its last pass does instead, without the zero setting (22h.1) that triggers the tare.
         L('HOOK3', 'MOV', 'DPTR', '#%d' % FLAG3); I('MOVX', 'A', '@DPTR'); I('JNZ', 'FAST')
         I('MOV', 'A', '#1'); I('MOVX', '@DPTR', 'A')
-        I('SETBIT', 0x4D); I('CLRBIT', 0x03); I('LJMP', 0x8416)
+        I('SETBIT', 0x4D); I('CLRBIT', 0x03); I('LJMP', P['wake_exit'])
         L('FAST', 'MOV', 'DPTR', '#%d' % INHIB); I('MOV', 'A', '#%d' % INHIB_PASSES); I('MOVX', '@DPTR', 'A')
-        I('LCALL', 0x8AA3)                                   # end-of-start-up init (7300, 7311, 21h.7 ...)
+        I('LCALL', P['start_init'])                                   # end-of-start-up init (7300, 7311, 21h.7 ...)
         I('CLRBIT', 0x70); I('CLRBIT', 0x0E)                 # 2Eh.0 and 21h.6 clear, as the start-up branch does (22h.1, the
                                                              # switch-on zero request it also sets, is deliberately left alone)
-        I('CLRBIT', 0x03); I('LJMP', 0x8416)
+        I('CLRBIT', 0x03); I('LJMP', P['wake_exit'])
     if skip_startup:
         # replaces LCALL B1A3 at 8314 (start of the normal weighing pass): for a short while after a skipped start-up
         # the tare switch event (2Eh.0) is dropped, so the press that woke the balance is not taken as a tare
         L('HOOK5', 'MOV', 'DPTR', '#%d' % INHIB); I('MOVX', 'A', '@DPTR'); I('JZ', 'H5END')
         I('DEC', 'A'); I('MOVX', '@DPTR', 'A'); I('CLRBIT', 0x70)
-        L('H5END', 'LJMP', 0xB1A3)
+        L('H5END', 'LJMP', P['weigh'])
     if diag == 2:
         L('PUTHEX', 'PUSH', 0xE0); I('SWAP', 'A'); I('ANL', 'A', '#15'); I('ADD', 'A', '#144'); I('DA'); I('ADDC', 'A', '#64'); I('DA')
-        I('LCALL', 0xD6FC); I('POP', 0xE0); I('ANL', 'A', '#15'); I('ADD', 'A', '#144'); I('DA'); I('ADDC', 'A', '#64'); I('DA')
-        I('LCALL', 0xD6FC); I('RET')
-    return P
+        I('LCALL', P['putc']); I('POP', 0xE0); I('ANL', 'A', '#15'); I('ADD', 'A', '#144'); I('DA'); I('ADDC', 'A', '#64'); I('DA')
+        I('LCALL', P['putc']); I('RET')
+    return prog
 
 
-def build(img, diag=False, skip_startup=False, poll_weigh=False):
+def build(img, diag=False, skip_startup=False, poll_weigh=False, profile=None):
     img = bytearray(img)
     if len(img) != 0x8000 or sum(img) & 0xFF: raise ValueError("expected a 32 KiB image with a good checksum")
-    patches = dict(PATCHES)
-    if not poll_weigh: del patches[0x830E]
+    P = profiles.get(bytes(img), profile)
+    patches = {P['bar_up']: P['bar_up_old'], P['tail']: P['tail_old'], P['stage1_setb']: bytes([0xD2, 0x38])}
+    if poll_weigh: patches[P['poll']] = P['poll_old']
     if skip_startup:
-        patches[0x836E] = bytes([0xD2, 0x4D, 0xC2, 0x03, 0x02, 0x84, 0x16])
-        patches[0x8314] = bytes([0x12, 0xB1, 0xA3])
+        patches[P['wake']] = P['wake_old']
+        patches[P['normal']] = P['normal_old']
     for a, old in patches.items():
-        if img[a - 0x8000:a - 0x8000 + len(old)] != old: raise ValueError(f"unexpected bytes at {a:04X}")
-    code, lab = assemble(CODE_AT, program(diag, skip_startup, poll_weigh))
+        if img[a - 0x8000:a - 0x8000 + len(old)] != old: raise ValueError(f"unexpected bytes at {a:04X}: not the stock image of this version")
+    code, lab = assemble(CODE_AT, program(P, diag, skip_startup, poll_weigh))
     o = CODE_AT - 0x8000
     if any(b != 0xFF for b in img[o:o + len(code)]) or CODE_AT + len(code) > 0xF000:
         raise ValueError("patch area is not free filler")
     img[o:o + len(code)] = code
-    hooks = [(0x831A, lab['HOOK1']), (0x8876, lab['TAIL'])]
-    if poll_weigh: hooks.append((0x830E, lab['HOOK2']))
+    hooks = [(P['bar_up'], lab['HOOK1']), (P['tail'], lab['TAIL'])]
+    if poll_weigh: hooks.append((P['poll'], lab['HOOK2']))
     if skip_startup:
-        hooks.append((0x836E, lab['HOOK3']))
-        img[0x8314 - 0x8000:0x8314 - 0x8000 + 3] = bytes([0x12, lab['HOOK5'] >> 8, lab['HOOK5'] & 0xFF])   # LCALL HOOK5 (was LCALL B1A3)
+        hooks.append((P['wake'], lab['HOOK3']))
+        img[P['normal'] - 0x8000:P['normal'] - 0x8000 + 3] = bytes([0x12, lab['HOOK5'] >> 8, lab['HOOK5'] & 0xFF])   # LCALL HOOK5 (was LCALL weigh)
     for a, hook in hooks:
         img[a - 0x8000:a - 0x8000 + 3] = bytes([0x02, hook >> 8, hook & 0xFF])
-    img[0x83AE - 0x8000:0x83AE - 0x8000 + 2] = bytes([0, 0])
+    img[P['stage1_setb'] - 0x8000:P['stage1_setb'] - 0x8000 + 2] = bytes([0, 0])
     img[CHECKSUM_AT - 0x8000] = 0
     img[CHECKSUM_AT - 0x8000] = (-sum(img)) & 0xFF
     assert sum(img) & 0xFF == 0
     return bytes(img), code
 
 
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('inp'); ap.add_argument('out')
+    ap.add_argument('--skip-startup', action='store_true')
+    ap.add_argument('--poll-weigh', action='store_true')
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument('--diag', action='store_true'); g.add_argument('--diag2', action='store_true')
+    ap.add_argument('--version', choices=sorted(profiles.PROFILES), help='firmware version (default: detect)')
+    a = ap.parse_args()
+    out, code = build(open(a.inp, 'rb').read(), 2 if a.diag2 else a.diag, a.skip_startup, a.poll_weigh, a.version)
+    open(a.out, 'wb').write(out)
+    print(f'patch {CODE_AT:04X}-{CODE_AT + len(code) - 1:04X} ({len(code)} bytes); written {a.out} (ROM checksum OK)')
+
+
 if __name__ == '__main__':
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    if len(args) != 2: sys.exit(__doc__)
-    out, code = build(open(args[0], 'rb').read(), 2 if '--diag2' in sys.argv else bool('--diag' in sys.argv), '--skip-startup' in sys.argv, '--poll-weigh' in sys.argv)
-    sys.argv = [sys.argv[0]] + args
-    open(sys.argv[2], 'wb').write(out)
-    print(f'patch {CODE_AT:04X}-{CODE_AT + len(code) - 1:04X} ({len(code)} bytes); written {sys.argv[2]} (ROM checksum OK)')
+    main()
