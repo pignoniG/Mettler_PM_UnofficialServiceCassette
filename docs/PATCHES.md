@@ -35,11 +35,11 @@ Differences that matter:
 
 | Area | Used by |
 |---|---|
-| ROM E800..E957 | `--temperature` |
+| ROM E800..E97C (E730..E93F with `--raw`) | `--temperature` / `--raw` |
 | ROM E980..EA38 | `--standby-weigh` (and `--skip-startup`) |
 | ROM F000..F368 | `--comparator` |
 | XRAM 7090..70AF, ring 7682..76FF | `--comparator` |
-| XRAM 70E8..70ED | `--temperature` (counter, register save) |
+| XRAM 70E8..70ED | `--temperature` (T counter 70E8, register save 70E9..70EC, R counter 70ED) |
 | XRAM 70F0..70F8 | `--standby-weigh` (state, saved poll state, key events, first-wake flag, inhibit counter) |
 
 Still free: about 5 KB of ROM, XRAM 7700..77EF.
@@ -56,11 +56,28 @@ to 150 passes so calibration does not give error 1.
 
 ## --temperature
 
+(Since the `--raw` change the T-line code is laid out differently, so a rebuild is no longer byte-identical to the v6 image that was first flashed and tested; that image is what commit `c8b0800` builds. The simulator tests cover both layouts.)
+
 Hook at 827B (`LCALL C887`, the temperature routine, called once per pass from the common tail). In continuous
 output mode, when the interface is free and the output buffer is not nearly full, it sends `T nnnnnn` + CR LF
 every N passes through the firmware's own character routine `D6FC` (so line ending and parity follow the
 settings). The number is the 24-bit filtered count at XRAM 7047..7049 (about 2000 counts per degree C; the filter
 is a first-order low-pass with factor 1/4 per update).
+
+## --raw
+
+An addition to the temperature patch (same hook, same gates): an `R` line every pass (or every N) with the
+window sum, the normaliser output, both temperature counts and the window length, in hex; see PROTOCOL.md. The
+patch grows from 381 to 528 bytes and then starts at E730 instead of E800 (it still ends before
+the standby-weigh patch at E980). The hook is in the common pass tail, so the line is also produced with the
+display off.
+
+`tools/model_check.py` feeds raw values and temperature offsets to the simulated firmware, reads the R lines and
+the displayed weights and compares the weight differences with the correction formula of EEPROM_MAP.md section 3
+(zero, span and linearity as quadratics of temperature): the difference is 0.0 mg for 0..4000 g at temperature
+offsets of -20000, +5000 and +24000 counts on both V10.45 and V10.50. One thing the check showed: the firmware
+reports overload (`SI+`) when the *gross* value, including the pan, is too large, so the raw value of the empty
+pan matters in a simulation (X0 is the reference point of the linearity term, not the zero load).
 
 ## --standby-weigh
 

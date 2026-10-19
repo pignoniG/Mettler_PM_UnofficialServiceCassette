@@ -8,8 +8,12 @@ after boot or wake. Avoid bytes 00, 06 and 16.
 
 * Weight lines as now: `S      294.378 g` / `SD ...`
 * `T nnnnnn` temperature count (exists today).
-* `R wwwwwwww tttttt ffffff cc` (planned): 32-bit A/D window sum, unfiltered and filtered temperature counts,
-  window length (24).
+* `R wwwwwwww rrrrrr tttttt ffffff nn` (implemented, `--raw`; every pass by default, `--raw-every N`), all hex:
+  `w` the 32-bit A/D window sum the interrupt leaves (XRAM 7045..7042, = sum >> 8), `r` the raw value that feeds the
+  correction (24 bit, XRAM 749C..749A; with the comparator patch this is its average), `t` the unfiltered temperature
+  count (RAM 16h..14h, updated when the balance measures it), `f` the filtered count the compensation uses (XRAM
+  7049..7047), `n` the window length in interrupt ticks (24 on V10.45, 20 on V10.50). Raw per window = w * (240/n) / 256.
+  The line follows the same gates as the T line: continuous output mode, interface free, output buffer not nearly full.
 * Answers to commands start with `=`.
 
 ## Commands (PC to balance)

@@ -32,7 +32,7 @@ def load_eeprom(path):
 
 
 def lines(sent):
-    return [l for l in bytes(sent).replace(b'\x26', b'').split(b'\r\n') if l]
+    return [l for l in bytes(sent).replace(b'\x26', b'').replace(b'\x00', b'').split(b'\r\n') if l]     # pause bytes out
 
 
 class SimTests(object):                       # run once per firmware version, see the subclasses at the end
@@ -116,6 +116,35 @@ class SimTests(object):                       # run once per firmware version, s
             for _ in range(30): self.pass_(s)
             self.assertGreaterEqual(visits[0], 30, name)               # the pass-tail hook is reached on every pass
             self.assertNotEqual(s.ram[0x3D], 0, name)                  # and the error code is set
+
+    def test_raw_line_reports_what_the_interrupt_left(self):
+        import re
+        rom = rom_temperature.build(self.stock, 0, None, True, 1)[0]
+        s = self.sim(rom); w = s.window
+        RL = re.compile(rb'^R ([0-9A-F]{8}) ([0-9A-F]{6}) ([0-9A-F]{6}) ([0-9A-F]{6}) ([0-9A-F]{2})$')
+        for _ in range(130): s.one_pass(s_value=s.window_sum(self.x0), sw=0x80, temp=300000); s.sent.clear()
+        got = []
+        for i in range(30):
+            s.one_pass(s_value=s.window_sum(self.x0 + 1548 * 10), sw=0x80, temp=300000 + i)
+            got += [[int(g, 16) for g in m.groups()] for m in map(RL.match, lines(s.sent)) if m]; s.sent.clear()
+        self.assertEqual(len(got), 30)                                   # one R line per pass
+        wsum, raw, tun, tfi, win = got[-1]
+        self.assertEqual(wsum, s.window_sum(self.x0 + 1548 * 10) >> 8)   # the 32-bit window sum
+        self.assertEqual(raw, (wsum * (240 // w)) >> 8)                  # the normaliser's output
+        self.assertEqual(tun, 300029)                                    # unfiltered temperature
+        self.assertTrue(tun - 8 < tfi <= tun)                            # filtered temperature follows it
+        self.assertEqual(win, w)
+
+    def test_model_matches_the_firmware(self):
+        sys.path.insert(0, os.path.join(ROOT, 'tools'))
+        import model_check
+        try: model_check.find_pm_eeprom()
+        except SystemExit: self.skipTest('pm_eeprom.py of the EEPROM tool not found (set PM_TOOL)')
+        for dt in (5000, -20000):
+            rows = model_check.run(self.stock, EEP, dt, (0, 100, 2000, 4000))
+            for g, raw, tf, shown, pred in rows:
+                self.assertIsNotNone(shown, (dt, g))
+                self.assertLessEqual(abs(shown - pred), 1.0, (dt, g))
 
 
 def _skip(env):

@@ -21,6 +21,7 @@ The PC side lives in [Mettler_PM_UnofficialServiceTool](https://github.com/pigno
 |---|---|---|
 | `--comparator` | long A/D averaging at the normal display speed (mass-comparator style: ring buffer, newest-half average, longer calibration timeouts) | running on a PM4600 (V10.45) |
 | `--temperature` | extra line `T 297904` every ~10 s: the balance's filtered temperature count (the number the service keypad shows) | running on a PM4600 |
+| `--raw` | an `R` line every pass: the 32-bit A/D window sum, the raw value that feeds the correction, the unfiltered and filtered temperature counts and the window length (hex), see [docs/PROTOCOL.md](docs/PROTOCOL.md) | simulator-tested, not yet on a balance |
 | `--standby-weigh` | with the display off (control bar up) the balance keeps weighing and sending its serial output; the bar-down poll and the configuration entry behave as stock | running on a PM4600 (overnight logs) |
 | `--skip-startup` | wake from standby without the display test, version number and switch-on tare (the first wake after power-on keeps them) | tested in the simulator, being tested on the balance |
 
@@ -33,7 +34,7 @@ module (EEPROM read/write, raw A/D line, boot guard for a bad EEPROM) is describ
 ## Use
 
 ```bash
-python3 build.py V10.45.bin out.bin --comparator --temperature --standby-weigh --skip-startup
+python3 build.py V10.45.bin out.bin --comparator --temperature --raw --standby-weigh --skip-startup
 ```
 
 `V10.45.bin` (or a V10.50 image) is your unmodified 32 KiB image. Burn `out.bin` into a 27C256 and put it in the cassette. The
@@ -50,12 +51,16 @@ weight lines and the standby behaviour, and lets patches be tested before an EPR
 PM_ROM=V10.45.bin PM_ROM_1050=V10.50.bin PM_EEPROM=dump.BIN python3 -m unittest discover -s tests
 ```
 
-The tests are skipped without your files. `sim/dis51.py` is a small 8051 disassembler.
+The tests are skipped without your files. `tools/model_check.py` compares the displayed weights of the simulated
+firmware with the correction model (it needs `pm_eeprom.py` of the EEPROM tool: `PM_TOOL=.../tools`). `sim/dis51.py` is a
+small 8051 disassembler.
 
 ## Roadmap
 
-1. `R` line with the raw A/D window sum and both temperature counts; check the correction formula against
-   the displayed weight.
+1. ~~`R` line with the raw A/D window sum and both temperature counts; check the correction formula against
+   the displayed weight.~~ Done in the simulator: the R line works on both versions and `tools/model_check.py` finds the
+   model of `EEPROM_MAP.md` section 3 identical to the firmware (0.0 mg at 0..4000 g and three temperatures). Still to do:
+   the same check against a log from a real balance.
 2. Command module: `~V` version/ID, `~R` EEPROM read.
 3. `~W` write with arming, whole-image checksum check, ID guard, restart; boot guard for a corrupt EEPROM
    (recovery mode).
