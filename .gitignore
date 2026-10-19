@@ -1,0 +1,13 @@
+# Mettler firmware and anything built from it must never be committed
+*.bin
+*.BIN
+*.rom
+*.hex
+out/
+# local notes with disassembly
+FIRMWARE_NOTES.md
+*.asm
+# python
+__pycache__/
+*.pyc
+.DS_Store
