@@ -1,0 +1,119 @@
+"""
+Simulator tests: run the real firmware (your own dump) with stubbed hardware.
+
+    PM_ROM=/path/V10.45.bin PM_EEPROM=/path/dump.BIN python3 -m unittest discover -s tests
+
+PM_ROM    the unmodified V10.45 image (32 KiB)
+PM_EEPROM a 128-byte 93C46 dump of a balance (programmer byte order is detected; byte 0x01 gets the
+          continuous-output bit set so the simulated balance streams its readings)
+Without these the tests are skipped: the repository contains no Mettler data.
+"""
+import os, sys, unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path[:0] = [os.path.join(ROOT, 'sim'), os.path.join(ROOT, 'patches'), ROOT]
+import fwsim, rom_comparator, rom_temperature, rom_standby_weigh
+
+ROM = os.environ.get('PM_ROM'); EEP = os.environ.get('PM_EEPROM')
+
+
+def load_eeprom(path):
+    """128 bytes in firmware order.  Dumps from an x16 programmer have the two bytes of every word swapped;
+    the right order is the one with the type-check byte (0x60..0x67) at address 0x68 and a valid
+    type-block checksum (0xA6 + sum of 0x04..0x2D = 0 mod 256)."""
+    b = open(path, 'rb').read()
+    assert len(b) == 128, 'expected a 128-byte dump'
+    for e in (bytes(b), bytes(b[i ^ 1] for i in range(128))):
+        if (e[0x68] & 0xF8) == 0x60 and (0xA6 + sum(e[0x04:0x2E])) & 0xFF == 0:
+            return e
+    raise AssertionError('not a recognisable PM EEPROM dump in either byte order')
+
+
+def lines(sent):
+    return [l for l in bytes(sent).replace(b'\x26', b'').split(b'\r\n') if l]
+
+
+@unittest.skipUnless(ROM and EEP and os.path.exists(ROM) and os.path.exists(EEP), 'set PM_ROM and PM_EEPROM')
+class SimTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.stock = open(ROM, 'rb').read()
+        e = bytearray(load_eeprom(EEP)); e[0x01] |= 0xC0           # interface: continuous
+        cls.eeprom = bytes(e)
+        cls.x0 = e[0x40] | e[0x41] << 8 | e[0x42] << 16            # raw reference point
+
+    def sim(self, rom, eeprom=None):
+        s = fwsim.Sim(rom, eeprom or self.eeprom); s.boot(); return s
+
+    def pass_(self, s, grams=0.0, sw=0x80, raw_per_g=1548):
+        s.one_pass(s_value=int((self.x0 + raw_per_g * grams) * 25.6) << 8, sw=sw)
+        out = lines(s.sent); s.sent.clear(); return out
+
+    def settle(self, s, n=130):
+        out = []
+        for _ in range(n): out += self.pass_(s)
+        return out
+
+    def test_stock_boots_and_prints_version(self):
+        out = self.settle(self.sim(self.stock))
+        self.assertTrue(any(l.startswith(b'STANDARD') for l in out), out[:3])
+        self.assertTrue(any(l.startswith(b'S') and l.endswith(b' g') for l in out))
+
+    def test_patched_normal_mode_matches_stock(self):
+        a, b = self.sim(self.stock), self.sim(rom_standby_weigh.build(self.stock, False, True)[0])
+        self.settle(a); self.settle(b)
+        for g in (0, 10, 25):
+            la = [self.pass_(a, g) for _ in range(40)][-1]
+            lb = [self.pass_(b, g) for _ in range(40)][-1]
+            self.assertEqual(la, lb, g)
+
+    def test_stock_is_silent_with_the_bar_up_patched_is_not(self):
+        for rom, want in ((self.stock, 0), (rom_standby_weigh.build(self.stock, False, True)[0], 40)):
+            s = self.sim(rom); self.settle(s)
+            n = sum(1 for _ in range(40) for l in self.pass_(s, 10, 0xC0) if l.startswith(b'S'))
+            self.assertEqual(n, want)
+
+    def test_bar_up_reading_equals_normal_reading(self):
+        s = self.sim(rom_standby_weigh.build(self.stock, False, True)[0]); self.settle(s)
+        normal = [l for _ in range(40) for l in self.pass_(s, 10)][-1]
+        up = [l for _ in range(40) for l in self.pass_(s, 10, 0xC0)][-1]
+        self.assertEqual(normal, up)
+
+    def test_wake_without_tare_when_start_up_is_skipped(self):
+        s = self.sim(rom_standby_weigh.build(self.stock, False, True)[0]); self.settle(s)
+        for _ in range(2): self.pass_(s, 10, 0xC0)
+        out = []
+        for _ in range(300): out += self.pass_(s, 10)           # the bar-down poll times out in the simulator: a wake
+        self.assertFalse(any(l.startswith(b'TA') for l in out))
+        self.assertTrue([l for l in out if l.startswith(b'S')][-1].strip().endswith(b'g'))
+        self.assertNotIn(b'0.000', [l for l in out if l.startswith(b'S')][-1])
+
+    def test_temperature_and_comparator_images_run(self):
+        rom = rom_comparator.build(self.stock)[0]
+        rom = rom_temperature.build(rom, 10)[0]                  # a T line every 10 passes keeps the test short
+        rom = rom_standby_weigh.build(rom, False, True)[0]
+        s = self.sim(rom); out = self.settle(s, 220)
+        self.assertTrue(any(l.startswith(b'T ') for l in out), 'no T line')
+        self.assertTrue(any(l.startswith(b'S') for l in out))
+
+    def test_error_states_keep_the_main_loop_running(self):
+        rom = rom_standby_weigh.build(self.stock, False, True)[0]
+        good = bytearray(self.eeprom)
+        for name, mutate in (('all FF', lambda b: bytearray([0xFF] * 128)),
+                             ('all 00', lambda b: bytearray(128)),
+                             ('bad cell checksum', lambda b: (b.__setitem__(0x67, b[0x67] ^ 0x55), b)[1]),
+                             ('bad type checksum', lambda b: (b.__setitem__(0x2D, b[0x2D] ^ 0x55), b)[1])):
+            s = fwsim.Sim(rom, bytes(mutate(bytearray(good)))); s.boot()
+            visits = [0]; step = s.step_hw
+            def counted():
+                if s.pc == 0x8876: visits[0] += 1
+                step()
+            s.step_hw = counted
+            for _ in range(30): self.pass_(s)
+            self.assertGreaterEqual(visits[0], 30, name)               # the pass-tail hook is reached on every pass
+            self.assertNotEqual(s.ram[0x3D], 0, name)                  # and the error code is set
+
+
+if __name__ == '__main__':
+    unittest.main()
