@@ -31,6 +31,8 @@ def main():
     ap.add_argument('--table', default=','.join(f'{k}x{n}' for k, n in rom_comparator.DEFAULT_TABLE),
                     help='comparator averaging per vibration-adapter setting 0..3: KxN (see docs/PATCHES.md)')
     ap.add_argument('--temperature', action='store_true', help='send "T nnnnnn" (temperature count) lines')
+    ap.add_argument('--raw', action='store_true', help='also send R lines: raw A/D window sum, raw value and temperature counts (hex)')
+    ap.add_argument('--raw-every', type=int, help='R line every N passes (default 1)')
     ap.add_argument('--every', type=int, help='temperature line every N passes (default: about every 10 s)')
     ap.add_argument('--standby-weigh', action='store_true', help='keep weighing and the serial output on with the display off')
     ap.add_argument('--version', choices=sorted(profiles.PROFILES), help='firmware version (default: detect)')
@@ -51,9 +53,9 @@ def main():
         table = tuple(tuple(int(v) for v in e.split('x')) for e in a.table.split(','))
         img, lab, code, ru = rom_comparator.build(img, table, profile=version)
         print(f'comparator: code {rom_comparator.CODE_AT:04X}+{len(code)} bytes, table {a.table}')
-    if a.temperature:
-        img, code = rom_temperature.build(img, a.every, version)
-        print(f'temperature: code {rom_temperature.CODE_AT:04X}+{len(code)} bytes')
+    if a.temperature or a.raw:
+        img, code, at = rom_temperature.build(img, a.every, version, a.raw, a.raw_every)
+        print(f'temperature{" + raw line" if a.raw else ""}: code {at:04X}+{len(code)} bytes')
     if a.standby_weigh:
         img, code = rom_standby_weigh.build(img, False, a.skip_startup, profile=version)
         print(f'standby-weigh: code {rom_standby_weigh.CODE_AT:04X}+{len(code)} bytes' + (' with --skip-startup' if a.skip_startup else ''))

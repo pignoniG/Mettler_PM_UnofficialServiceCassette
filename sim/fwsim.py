@@ -102,10 +102,13 @@ class Sim(CPU51):
         """what the A/D interrupt leaves for the main loop: the 40-bit window sum at 7041..7045"""
         for i in range(5): self.xram[0x7041 + i] = (s_value >> (8 * i)) & 0xFF
 
-    def one_pass(self, s_value=None, sw=None, max_steps=400_000, trace=False):
+    def one_pass(self, s_value=None, sw=None, max_steps=400_000, trace=False, temp=None):
         """run the main loop for one measurement window: sets the flags the ISR would, runs until the loop
         waits again; returns the visited pc list if trace"""
         if s_value is not None: self.set_window(s_value)
+        if temp is not None:                  # a new temperature result as the interrupt leaves it: 14h..16h, flag 2Ah.5
+            self.ram[0x14], self.ram[0x15], self.ram[0x16] = temp & 0xFF, (temp >> 8) & 0xFF, (temp >> 16) & 0xFF
+            self.setbit(0x55, 1)
         if sw is not None: self.sw = sw
         self.xram[0x70D1] = self.sw
         if self.getbit(0x4E) and self.idle_keys: self.ram[0x25] = 0      # standby: the bar scan leaves 25h = 0 when untouched
