@@ -8,9 +8,16 @@ import sys
 from cpu51 import CPU51
 
 
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'patches'))
+import profiles                      # per-version addresses (main loop wait, EEPROM routines, ...)
+
+
 class Sim(CPU51):
-    def __init__(self, rom, eeprom_fw):
+    def __init__(self, rom, eeprom_fw, version=None):
         super().__init__(rom)
+        self.prof = profiles.get(bytes(rom), version)
+        self.window = self.prof['window']
         self.eeprom = bytes(eeprom_fw)
         self.sent = []                          # bytes the UART would have sent
         self.sw = 0x00                          # 70D1: bit6 control bar, bit7 jumper line
@@ -18,7 +25,7 @@ class Sim(CPU51):
         self.hist = {}
         self.waits = {}
         self.idle_keys = True
-        self.pc_hooks = {0xCDB7: Sim.eeprom_write, 0xCD98: Sim.eeprom_load}
+        self.pc_hooks = {self.prof['ee_write']: Sim.eeprom_write, self.prof['ee_load']: Sim.eeprom_load}
         self.hold = set()
 
     def step_hw(self):
@@ -26,7 +33,7 @@ class Sim(CPU51):
         pc = self.pc
         if pc in self.pc_hooks:
             self.pc_hooks[pc](self); return
-        if pc == 0xCD2D:                       # boot timer self-test: both timers must have overflowed
+        if pc == self.prof['timer_test']:                       # boot timer self-test: both timers must have overflowed
             self.sfr[0x88] |= 0xA0
         op = self.code(pc)
         if op in (0x20, 0x30) and self.rel(self.code(pc + 2), pc + 3) == pc:      # JB/JNB bit,$
@@ -39,7 +46,7 @@ class Sim(CPU51):
 
     def hw_wait(self, bit, want_set):
         self.waits[bit] = self.waits.get(bit, 0) + 1
-        if bit in self.hold and self.pc == 0x82F3: raise StopIteration(bit)
+        if bit in self.hold and self.pc == self.prof['main_wait']: raise StopIteration(bit)
         self.setbit(bit, 1 if want_set else 0)
 
     def run_until(self, stop, max_steps=3_000_000):
@@ -84,8 +91,12 @@ class Sim(CPU51):
         n = 0
         while n < max_steps:
             self.step_hw(); n += 1
-            if self.pc == 0x82F3 and not self.getbit(0x48): return n
+            if self.pc == self.prof['main_wait'] and not self.getbit(0x48): return n
         raise RuntimeError("boot did not reach the main loop")
+
+    def window_sum(self, raw):
+        """the 40-bit window sum the A/D interrupt leaves for a given raw value (raw = (sum >> 8) * (240 / window) / 256)"""
+        return int(raw * 256 * self.window / 240) << 8
 
     def set_window(self, s_value):
         """what the A/D interrupt leaves for the main loop: the 40-bit window sum at 7041..7045"""
@@ -103,7 +114,7 @@ class Sim(CPU51):
         seen = []
         n = 0
         while True:
-            if self.pc == 0x82F3 and not self.getbit(0x48) and n > 0: break
+            if self.pc == self.prof['main_wait'] and not self.getbit(0x48) and n > 0: break
             if trace: seen.append(self.pc)
             self.step_hw(); n += 1
             if n > max_steps: raise RuntimeError(f"pass did not finish, pc={self.pc:04X}")

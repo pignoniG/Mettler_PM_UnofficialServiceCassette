@@ -19,17 +19,16 @@ follow the balance's interface settings.  The weight lines are unchanged.  Other
 Goes at E800 (free filler) and can be applied on top of any V10.45-based image, e.g. the
 comparator ROM.  Counter at XRAM 70E8, register save area 70E9..70ED.
 
-Usage:  rom_temperature.py IN.BIN OUT.BIN [--every 62]
+Usage:  rom_temperature.py IN.BIN OUT.BIN [--every N] [--version 10.45|10.50]
 """
 import argparse
 import asm51
+import profiles
 
 CODE_AT = 0xE800
 CHECKSUM_AT = 0xF7FF
-HOOK_AT, HOOK_OLD = 0x827B, bytes([0x12, 0xC8, 0x87])      # LCALL C887
 TEMP = 0x7047                                              # 24 bit filtered temperature count
 CNT, SAVE = 0x70E8, 0x70E9
-PUTC = 0xD6FC                                              # firmware character output
 PSW = 0xD0
 
 
@@ -59,14 +58,14 @@ def assemble(org, prog):
     return bytes(code), labels
 
 
-def program(every):
+def program(every, putc, temp_routine):
     P = []
     def I(*ins): P.append((None,) + ins)
     def L(label, *ins): P.append((label,) + ins)
     def dptr(v): I('MOV', 'DPTR', '#%d' % v)
-    def put(ch): I('MOV', 'A', '#%d' % ch); I('LCALL', PUTC)
+    def put(ch): I('MOV', 'A', '#%d' % ch); I('LCALL', putc)
 
-    I('LCALL', 0xC887)                                      # what the original call did
+    I('LCALL', temp_routine)                                # what the original call did
     dptr(0x7601); I('MOVX', 'A', '@DPTR'); I('ANL', 'A', '#192'); I('CJNE', 'A', '#192', 'DONE')   # cONT only
     for bit in (0x38, 0x7D, 0x78, 0x4B):                    # 27h.0 2Fh.5 2Fh.0 29h.3: output off / busy
         I('JB', bit, 'DONE')
@@ -95,7 +94,7 @@ def program(every):
         L('B%d' % k, 'MOV', 'A', 'R1'); I('ADD', 'A', '#%d' % kl); I('MOV', 'R1', 'A')
         I('MOV', 'A', 'R2'); I('ADDC', 'A', '#%d' % km); I('MOV', 'R2', 'A')
         I('MOV', 'A', 'R3'); I('ADDC', 'A', '#%d' % kh); I('MOV', 'R3', 'A')
-        I('MOV', 'A', 'R0'); I('ADD', 'A', '#48'); I('LCALL', PUTC)
+        I('MOV', 'A', 'R0'); I('ADD', 'A', '#48'); I('LCALL', putc)
     put(0x0D); put(0x0A)
     dptr(SAVE)
     for r in ('R0', 'R1', 'R2', 'R3'):
@@ -105,18 +104,22 @@ def program(every):
     return P
 
 
-def build(img, every=62):
+def build(img, every=None, profile=None):
+    """every: a T line every N passes; the default is about 10 s (62 passes of 0.16 s, 75 of 0.133 s)"""
     img = bytearray(img)
     if len(img) != 0x8000: raise ValueError("expected a 32 KiB ROM image")
     if sum(img) & 0xFF: raise ValueError("ROM checksum of the input is already wrong")
-    if img[HOOK_AT - 0x8000:HOOK_AT - 0x8000 + 3] != HOOK_OLD:
-        raise ValueError("unexpected bytes at 827B: not a V10.45 image")
-    code, lab = assemble(CODE_AT, program(every))
+    P = profiles.get(bytes(img), profile)
+    if every is None: every = round(10 * 150 / P['window'])
+    hook = P['temp_call']
+    if img[hook - 0x8000:hook - 0x8000 + 3] != P['temp_call_old']:
+        raise ValueError(f"unexpected bytes at {hook:04X}: not the stock image of this version")
+    code, lab = assemble(CODE_AT, program(every, P['putc'], P['temp_routine']))
     o = CODE_AT - 0x8000
     if any(b != 0xFF for b in img[o:o + len(code)]) or CODE_AT + len(code) > 0xF000:
         raise ValueError("patch area is not free filler")
     img[o:o + len(code)] = code
-    img[HOOK_AT - 0x8000:HOOK_AT - 0x8000 + 3] = bytes([0x12, CODE_AT >> 8, CODE_AT & 0xFF])
+    img[hook - 0x8000:hook - 0x8000 + 3] = bytes([0x12, CODE_AT >> 8, CODE_AT & 0xFF])
     img[CHECKSUM_AT - 0x8000] = 0
     img[CHECKSUM_AT - 0x8000] = (-sum(img)) & 0xFF
     assert sum(img) & 0xFF == 0
@@ -126,12 +129,13 @@ def build(img, every=62):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('inp'); p.add_argument('out')
-    p.add_argument('--every', type=int, default=62, help='send a T line every N weighing passes (~0.16 s each)')
+    p.add_argument('--every', type=int, help='send a T line every N weighing passes (default: about every 10 s)')
+    p.add_argument('--version', choices=sorted(profiles.PROFILES), help='firmware version (default: detect)')
     a = p.parse_args()
-    assert 1 <= a.every <= 255
-    out, code = build(open(a.inp, 'rb').read(), a.every)
+    assert a.every is None or 1 <= a.every <= 255
+    out, code = build(open(a.inp, 'rb').read(), a.every, a.version)
     open(a.out, 'wb').write(out)
-    print(f"patch {CODE_AT:04X}-{CODE_AT + len(code) - 1:04X} ({len(code)} bytes), T line every {a.every} passes")
+    print(f"patch {CODE_AT:04X}-{CODE_AT + len(code) - 1:04X} ({len(code)} bytes)")
     print(f"written {a.out} (ROM checksum OK)")
 
 

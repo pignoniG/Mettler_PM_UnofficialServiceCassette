@@ -1,9 +1,10 @@
 """
 Simulator tests: run the real firmware (your own dump) with stubbed hardware.
 
-    PM_ROM=/path/V10.45.bin PM_EEPROM=/path/dump.BIN python3 -m unittest discover -s tests
+    PM_ROM=/path/V10.45.bin PM_ROM_1050=/path/V10.50.bin PM_EEPROM=/path/dump.BIN python3 -m unittest discover -s tests
 
-PM_ROM    the unmodified V10.45 image (32 KiB)
+PM_ROM      the unmodified V10.45 image (32 KiB)
+PM_ROM_1050 the unmodified V10.50 image (optional; its tests are skipped without it)
 PM_EEPROM a 128-byte 93C46 dump of a balance (programmer byte order is detected; byte 0x01 gets the
           continuous-output bit set so the simulated balance streams its readings)
 Without these the tests are skipped: the repository contains no Mettler data.
@@ -13,9 +14,9 @@ import os, sys, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path[:0] = [os.path.join(ROOT, 'sim'), os.path.join(ROOT, 'patches'), ROOT]
-import fwsim, rom_comparator, rom_temperature, rom_standby_weigh
+import fwsim, profiles, rom_comparator, rom_temperature, rom_standby_weigh
 
-ROM = os.environ.get('PM_ROM'); EEP = os.environ.get('PM_EEPROM')
+EEP = os.environ.get('PM_EEPROM')
 
 
 def load_eeprom(path):
@@ -34,11 +35,13 @@ def lines(sent):
     return [l for l in bytes(sent).replace(b'\x26', b'').split(b'\r\n') if l]
 
 
-@unittest.skipUnless(ROM and EEP and os.path.exists(ROM) and os.path.exists(EEP), 'set PM_ROM and PM_EEPROM')
-class SimTests(unittest.TestCase):
+class SimTests(object):                       # run once per firmware version, see the subclasses at the end
+    ROM_ENV = None; VERSION = None
+
     @classmethod
     def setUpClass(cls):
-        cls.stock = open(ROM, 'rb').read()
+        cls.stock = open(os.environ[cls.ROM_ENV], 'rb').read()
+        assert profiles.detect(cls.stock) == cls.VERSION, 'wrong firmware version in ' + cls.ROM_ENV
         e = bytearray(load_eeprom(EEP)); e[0x01] |= 0xC0           # interface: continuous
         cls.eeprom = bytes(e)
         cls.x0 = e[0x40] | e[0x41] << 8 | e[0x42] << 16            # raw reference point
@@ -47,7 +50,7 @@ class SimTests(unittest.TestCase):
         s = fwsim.Sim(rom, eeprom or self.eeprom); s.boot(); return s
 
     def pass_(self, s, grams=0.0, sw=0x80, raw_per_g=1548):
-        s.one_pass(s_value=int((self.x0 + raw_per_g * grams) * 25.6) << 8, sw=sw)
+        s.one_pass(s_value=s.window_sum(self.x0 + raw_per_g * grams), sw=sw)
         out = lines(s.sent); s.sent.clear(); return out
 
     def settle(self, s, n=130):
@@ -107,12 +110,27 @@ class SimTests(unittest.TestCase):
             s = fwsim.Sim(rom, bytes(mutate(bytearray(good)))); s.boot()
             visits = [0]; step = s.step_hw
             def counted():
-                if s.pc == 0x8876: visits[0] += 1
+                if s.pc == s.prof['tail']: visits[0] += 1
                 step()
             s.step_hw = counted
             for _ in range(30): self.pass_(s)
             self.assertGreaterEqual(visits[0], 30, name)               # the pass-tail hook is reached on every pass
             self.assertNotEqual(s.ram[0x3D], 0, name)                  # and the error code is set
+
+
+def _skip(env):
+    return unittest.skipUnless(os.environ.get(env) and os.path.exists(os.environ[env]) and EEP and os.path.exists(EEP),
+                               f'set {env} and PM_EEPROM')
+
+
+@_skip('PM_ROM')
+class SimTestsV1045(SimTests, unittest.TestCase):
+    ROM_ENV = 'PM_ROM'; VERSION = '10.45'
+
+
+@_skip('PM_ROM_1050')
+class SimTestsV1050(SimTests, unittest.TestCase):
+    ROM_ENV = 'PM_ROM_1050'; VERSION = '10.50'
 
 
 if __name__ == '__main__':
