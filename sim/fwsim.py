@@ -28,6 +28,8 @@ class Sim(CPU51):
         self.rx_queue = []
         self.pc_hooks = {self.prof['ee_write']: Sim.eeprom_write, self.prof['ee_load']: Sim.eeprom_load}
         self.hold = set()
+        self.uart_budget = None                 # characters the UART can send per pass (None: the ring is emptied after every pass)
+        self.pass_sent = 0
 
     def step_hw(self):
         """one instruction; a self-loop on a flag the interrupts would change is broken here"""
@@ -72,6 +74,7 @@ class Sim(CPU51):
         self.sent.append(ch & 0x7F)
         self.ram[0x36] = (self.ram[0x36] + 1) & 0x7F
         self.ram[0x35] -= 1
+        self.pass_sent += 1
 
     def uart_drain(self):
         """what the transmit interrupt does with the 7200 ring (count 35h, read index 36h)"""
@@ -122,6 +125,7 @@ class Sim(CPU51):
     def one_pass(self, s_value=None, sw=None, max_steps=400_000, trace=False, temp=None):
         """run the main loop for one measurement window: sets the flags the ISR would, runs until the loop
         waits again; returns the visited pc list if trace"""
+        self.pass_sent = 0
         if s_value is not None: self.set_window(s_value)
         if temp is not None:                  # a new temperature result as the interrupt leaves it: 14h..16h, flag 2Ah.5
             self.ram[0x14], self.ram[0x15], self.ram[0x16] = temp & 0xFF, (temp >> 8) & 0xFF, (temp >> 16) & 0xFF
@@ -138,7 +142,9 @@ class Sim(CPU51):
             if trace: seen.append(self.pc)
             self.step_hw(); n += 1
             if n > max_steps: raise RuntimeError(f"pass did not finish, pc={self.pc:04X}")
-        self.uart_drain()
+        if self.uart_budget is None: self.uart_drain()
+        else:                                   # a UART of limited speed: what it could not send stays in the ring for the next pass
+            while self.ram[0x35] and self.pass_sent < self.uart_budget: self.uart_one()
         self.ticks = getattr(self, 'ticks', 0) + 1
         return seen if trace else n
 

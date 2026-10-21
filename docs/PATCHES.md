@@ -14,6 +14,7 @@ ROM areas the patches use are unused in both.
 | | V10.45 | V10.50 |
 |---|---|---|
 | A/D window (interrupt ticks, per weighing pass) | 24 (0.160 s) | 20 (0.133 s) |
+| `R` line default spacing (`raw_every`) | every pass | every second pass |
 | comparator hook `CC11` (normaliser) | CC11 | CB22 |
 | temperature call / routine | 827B / C887 | 8275 / C7E7 |
 | pass tail | 8876 | 886A |
@@ -27,6 +28,12 @@ Differences that matter:
 * The window is shorter in V10.50. The comparator converts its restart threshold (120 mg) with the window
   length, and the temperature line's default interval is 75 passes against 62, both about 10 s. The comparator
   ring holds the same number of windows, so its averaging time is 0.83 times as long as in V10.45.
+* The shorter pass leaves the UART little margin. The weight line and the compact `R` line together are about 40
+  characters per pass: 245 characters/s at 0.160 s, 295 characters/s at 0.133 s against a UART service of about
+  300 characters/s. With the simulator's UART model (`Sim.uart_budget`, characters sent per pass) the output ring
+  of the every-pass build grows slowly on V10.50, while the every-second-pass build stays empty down to 36
+  characters per pass. So V10.50 defaults to `raw_every=2`, and the `R` line is skipped while the output ring
+  holds 40 bytes or more (it was 64), so weight lines always come first.
 * The V10.50 temperature routine sets error code 4 on a range failure without raising the error display flag.
 * V10.50 has the resolution-aware interrupt filter ladder. It is not part of the patches and the simulator does
   not model the interrupt filter, so the settling behaviour of the combination is untested.
@@ -98,7 +105,23 @@ routine; and the three bytes at the loader's start (hex_guard, 9080 / C4AE, `75 
 compares the ID bytes 0E..10 of the incoming image with the chip unless armed with `XB`, and on a mismatch leaves
 through the loader's error exit (902D / C45B, `EL`). `XR` waits for the output buffer to empty and jumps to the
 reset vector. Tested in the simulator on both versions (arming, bad checksum, ID mismatch, override, persistence
-across a simulated power cycle) and on a PM4600 (V10.45) with a full dump, write and restore.
+across a simulated power cycle) and on a PM4600 with V10.45 and with V10.50: full dump, write and restore, the
+three refusals, `XB` and `XR`.
+
+**`XD` keeps the interface byte.** The V10.50 dump routine really starts at C52B: it first stores the pause index
+in the interface byte at XRAM 74E3 (old nibble moved to the high half) and its last instructions at C582 swap the
+nibbles back. The patch calls it at C535, so only the end ran and every `XD` left 74E3 swapped (`1A` became `A1`),
+which changes flags 26h and 27h and stopped the stock weight lines while the `R` hook, which reads the setting
+from 7601, kept printing, one line every two seconds. The service handler therefore saves 74E3 before the call
+and restores it afterwards (both versions). It was found on the balance with `--debug-flags`, which appends the
+flag bytes 20h..2Fh, 35h..3Ah, 74E3 and 7601 to the long `R` line; the simulator test
+`test_service_version_and_dump` checks that 74E3 is unchanged after `XD`.
+
+## --debug-flags (diagnosis only)
+
+`build.py ... --raw --debug-flags` appends ` G` and the bytes 20h..2Fh, 35h..3Ah (output ring), XRAM 74E3 and 7601
+to the long `R` line (hex; the code needs the room from E700 on V10.50). The long line still gets through when the
+weight lines do not, so the flags can be read in a stalled state and compared with a healthy one.
 
 ## --skip-startup
 

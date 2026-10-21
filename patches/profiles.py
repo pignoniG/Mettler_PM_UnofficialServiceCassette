@@ -7,6 +7,9 @@ every entry is the same code in a different place; see docs/PATCHES.md.  RAM, XR
 the same in all versions and are not listed here.
 
   window          A/D window length in interrupt ticks (150 ticks/s): 24 = 0.160 s, 20 = 0.133 s per pass
+  raw_every       default spacing of the R line in passes: the UART serves about 300 characters/s, the weight line and the compact
+                  R line together are about 40 characters per pass, which fits a 0.160 s pass (245/s) but sits at the limit
+                  of a 0.133 s pass (295/s), so V10.50 sends an R line every second pass
   comp_*          comparator: the raw-value normaliser CC11 and where its stock code resumes
   cal_timeouts    MOV 26h,#n countdowns (passes) of the calibration / stability waits
   temp_*          the call of the temperature routine in the common pass tail
@@ -18,7 +21,7 @@ the same in all versions and are not listed here.
 """
 PROFILES = {
     '10.45': dict(
-        window=24, signature={0x8020: b'105'},
+        window=24, raw_every=1, signature={0x8020: b'105'},
         comp_hook=0xCC11, comp_hook_old=bytes([0x85, 0x32, 0xF0]), comp_resume=0xCC14,
         cal_timeouts={0x93B6: 0x30, 0x9AB0: 0x48},
         temp_call=0x827B, temp_call_old=bytes([0x12, 0xC8, 0x87]), temp_routine=0xC887,
@@ -33,7 +36,7 @@ PROFILES = {
         hex_dump=0x90FD, hex_load=0x8FCE, hex_guard=0x9080, hex_guard_old=bytes([0x75, 0x82, 0x00]), hex_error=0x902D, hex_reset_wait=0x90A1, reset=0x8200,
         main_wait=0x82F3, ee_load=0xCD98, ee_write=0xCDB7, timer_test=0xCD2D),
     '10.50': dict(
-        window=20, signature={0x8020: b'100'},
+        window=20, raw_every=2, signature={0x8020: b'100'},
         comp_hook=0xCB22, comp_hook_old=bytes([0x85, 0x32, 0xF0]), comp_resume=0xCB25,
         cal_timeouts={0x91AE: 0x40, 0x99CD: 0x60},
         temp_call=0x8275, temp_call_old=bytes([0x12, 0xC7, 0xE7]), temp_routine=0xC7E7,

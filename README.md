@@ -26,7 +26,7 @@ The PC side lives in [Mettler_PM_UnofficialServiceTool](https://github.com/pigno
 | `--service` | EEPROM read and write over serial: `XV` version and ID, `XD` dump, `XA`/`XB` arm, `XL` load, `XR` restart, with checksum, ID and arming guards (`tools/svc_client.py` is the PC side; the GUI of Mettler_PM_UnofficialServiceTool uses the same commands for live read/write and the adjustment procedures) | dump, write, restore, the refusals (unarmed, bad checksum, ID mismatch), the `XB` override and restart tested on a PM4600 (V10.45) |
 | `--skip-startup` | wake from standby without the display test, version number and switch-on tare (the first wake after power-on keeps them) | tested in the simulator, being tested on the balance |
 
-**Firmware versions.** V10.45 is what the patches were developed and tested on (PM4600). V10.50 is supported through an address table (`patches/profiles.py`): every hook site and firmware routine was found by instruction-pattern matching, the patched images build and pass the same simulator tests, but **V10.50 has not been tried on a real balance yet**. `build.py` detects the version from the image.
+**Firmware versions.** V10.45 is what the patches were developed and tested on (PM4600). V10.50 is supported through an address table (`patches/profiles.py`): every hook site and firmware routine was found by instruction-pattern matching, the patched images build and pass the same simulator tests, and the full set (comparator, `T`/`R` lines, standby weighing, skip start-up, service commands) has been run on a PM4600 with a V10.50 cassette: version, dump, write and restore, the refusal paths, the `XB` override, `XR` and the stream after a dump were checked on the balance. On V10.50 the `R` line comes every second pass (the 0.133 s pass leaves little UART margin). With the display off the stream, `version` and `dump` worked on an earlier build of this ROM; a long soak and a write with the display off are still to be checked with the final one. `build.py` detects the version from the image.
 
 Details, hook addresses and the memory map are in [docs/PATCHES.md](docs/PATCHES.md). The serial protocol (output
 lines and the service commands) is in [docs/PROTOCOL.md](docs/PROTOCOL.md). The boot guard for a corrupt EEPROM is
@@ -79,7 +79,7 @@ small 8051 disassembler.
    the same check against a log from a real balance.
 2. ~~Command module: version/ID, EEPROM read.~~ Done (`--service`, `XV`, `XD`).
 3. ~~Write with arming, checksum check, ID guard, restart.~~ Done (`XA`/`XB`/`XL`/`XR`), tested on a PM4600 with a
-   write and restore of the chip. Refusals and `XR` also checked on the balance (chip unchanged after each refusal). The `XB` override (a changed ID written, then the original restored) was checked too. Still to do: V10.50 on a real balance;
+   write and restore of the chip. Refusals and `XR` also checked on the balance (chip unchanged after each refusal). The `XB` override (a changed ID written, then the original restored) was checked too. V10.50 was checked the same way (see Firmware versions) after a bug in `XD` was found and fixed there (below). Still to do:
    boot guard for a corrupt EEPROM (recovery mode).
 4. PC-side service procedures (sticker check, rebuild, linearity, calibration, TC fit).
 

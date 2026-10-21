@@ -25,7 +25,7 @@ Commands (each a line ending CR LF; send a newline first, the receiver drops the
 The patched stock load routine needs the full 128 bytes in order, checksums valid, and a valid checksum of the
 three EEPROM blocks (04..2D, 2E..31, 3E..67); the user-calibration block 32..35 is not checked by it.
 
-Code goes at EB00 (free filler); XRAM 70EF = arm state, 70F9..70FB scratch.
+Code goes at EB00 (free filler); XRAM 70EF = arm state, 70F9..70FB scratch.  XD saves and restores the interface byte 74E3.
 Usage:  rom_service.py IN.BIN OUT.BIN [--version 10.45|10.50]
 """
 import argparse
@@ -79,7 +79,12 @@ def program(P, ver):
         I('DB', *text(letter + '\r\n')); I('DWL', target)
     I('DB', 0x24); I('DWL', ES)                              # anything else: ES
 
-    L('HXD', 'LCALL', P['hex_dump']); I('LJMP', DONE)
+    # the stock dump routine of V10.50 ends by swapping the nibbles of the interface-setting byte 74E3 (its start sets the pause
+    # index and saves the old value there); entered at the start of the dump body that left 74E3 changed for good and the stock
+    # weight lines stopped.  Keep the byte as it was.
+    L('HXD', 'MOV', 'DPTR', '#%d' % 0x74E3); I('MOVX', 'A', '@DPTR'); I('PUSH', 0xE0)
+    I('LCALL', P['hex_dump'])
+    I('POP', 0xE0); I('MOV', 'DPTR', '#%d' % 0x74E3); I('MOVX', '@DPTR', 'A'); I('LJMP', DONE)
     L('HXA', 'MOV', 'DPTR', '#%d' % ARM); I('MOV', 'A', '#1'); I('MOVX', '@DPTR', 'A'); say('XA\r\n'); I('LJMP', DONE)
     L('HXB', 'MOV', 'DPTR', '#%d' % ARM); I('MOV', 'A', '#2'); I('MOVX', '@DPTR', 'A'); say('XB\r\n'); I('LJMP', DONE)
     L('HXL', 'MOV', 'DPTR', '#%d' % ARM); I('MOVX', 'A', '@DPTR'); I('JNZ', 'HXL2')

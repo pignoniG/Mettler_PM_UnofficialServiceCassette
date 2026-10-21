@@ -8,7 +8,7 @@ after boot or wake. Avoid bytes 00, 06 and 16.
 
 * Weight lines as now: `S      294.378 g` / `SD ...`
 * `T nnnnnn` temperature count (exists today).
-* `R wwwwwwww rrrrrr` (implemented, `--raw`; every pass by default, `--raw-every N`), hex: `w` the 32-bit A/D window sum
+* `R wwwwwwww rrrrrr` (implemented, `--raw`; every pass by default on V10.45, every second pass on V10.50, `--raw-every N`), hex: `w` the 32-bit A/D window sum
   the interrupt leaves (XRAM 7045..7042, = sum >> 8), `r` the raw value that feeds the correction (24 bit, XRAM
   749C..749A; with the comparator patch this is its average). Raw per window = w * (240/n) / 256. About once a second
   (`--raw-ext-every N`) the line is longer: `R wwwwwwww rrrrrr tttttt ffffff nn`, adding `t` the unfiltered temperature
@@ -48,7 +48,7 @@ the whole dump and a restore of the original worked, and a changed byte 0x7F was
 checked: `XL` unarmed gives `EL`; with `XA`, an image with a bad cell checksum or a different ID gives `XL` and then
 `EL` after the records, and a dump afterwards was identical to the one before. `XR` answers `XR` and the balance restarts
 (wake it with the bar). `XB` checked too: an image with a changed ID (valid checksums) was written with the override, read back, and the original
-written back the same way (a plain `XA` load would have refused it). Not tried on a real balance: V10.50.
+written back the same way (a plain `XA` load would have refused it). V10.50 behaves the same (checked with the full ROM: version, dump, write and restore, the refusals, `XB`, `XR`).
 
 ## Stock commands useful for a PC tool
 
