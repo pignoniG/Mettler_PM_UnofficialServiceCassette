@@ -14,7 +14,7 @@ import argparse, hashlib, os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'patches'))
-import profiles, rom_comparator, rom_temperature, rom_standby_weigh
+import profiles, rom_comparator, rom_temperature, rom_standby_weigh, rom_service
 
 # sha256 of the unmodified images this was developed on (a hint only; the patches check the bytes)
 KNOWN_SHA256 = {
@@ -34,6 +34,7 @@ def main():
     ap.add_argument('--raw', action='store_true', help='also send R lines: raw A/D window sum, raw value and temperature counts (hex)')
     ap.add_argument('--raw-every', type=int, help='R line every N passes (default 1)')
     ap.add_argument('--every', type=int, help='temperature line every N passes (default: about every 10 s)')
+    ap.add_argument('--service', action='store_true', help='serial service commands: XV version, XD dump the EEPROM, XA/XB arm, XL load, XR restart')
     ap.add_argument('--standby-weigh', action='store_true', help='keep weighing and the serial output on with the display off')
     ap.add_argument('--version', choices=sorted(profiles.PROFILES), help='firmware version (default: detect)')
     ap.add_argument('--skip-startup', action='store_true', help='with --standby-weigh: wake without start-up sequence and tare')
@@ -59,6 +60,9 @@ def main():
     if a.standby_weigh:
         img, code = rom_standby_weigh.build(img, False, a.skip_startup, profile=version)
         print(f'standby-weigh: code {rom_standby_weigh.CODE_AT:04X}+{len(code)} bytes' + (' with --skip-startup' if a.skip_startup else ''))
+    if a.service:
+        img, code, at = rom_service.build(img, version)
+        print(f'service: code {at:04X}+{len(code)} bytes (commands XV XD XA XB XL XR)')
     if sum(img) & 0xFF:
         sys.exit('internal error: ROM checksum is wrong')
     open(a.out, 'wb').write(img)

@@ -25,17 +25,28 @@ class Sim(CPU51):
         self.hist = {}
         self.waits = {}
         self.idle_keys = True
+        self.rx_queue = []
         self.pc_hooks = {self.prof['ee_write']: Sim.eeprom_write, self.prof['ee_load']: Sim.eeprom_load}
         self.hold = set()
 
     def step_hw(self):
         """one instruction; a self-loop on a flag the interrupts would change is broken here"""
         pc = self.pc
+        if self.rx_queue and self.cycles % 1000 == 0:          # the UART delivers about one character per 1000 machine cycles (9600 baud)
+            self.rx(bytes([self.rx_queue.pop(0)]))
+        if self.cycles % 3300 == 0 and self.ram[0x35]:        # transmit: the real UART service is about 300 characters/s
+            self.uart_one()
+        if pc == self.prof['hex_reset_wait']:                  # after a successful EEPROM load the stock code waits for a
+            self.ram[0x1E] = 0                                  # countdown (1Eh, run by the interrupt) and then restarts: time passes
         if pc in self.pc_hooks:
             self.pc_hooks[pc](self); return
         if pc == self.prof['timer_test']:                       # boot timer self-test: both timers must have overflowed
             self.sfr[0x88] |= 0xA0
         op = self.code(pc)
+        if op in (0x20, 0x30) and self.code(pc + 1) == 0x48 and pc != self.prof['main_wait']:
+            # a loop outside the main loop that polls the window flag 29h.0: the interrupt would set it every 0.16 s
+            self.poll29 = getattr(self, 'poll29', 0) + 1
+            if self.poll29 % 40 == 0: self.setbit(0x48, 1)
         if op in (0x20, 0x30) and self.rel(self.code(pc + 2), pc + 3) == pc:      # JB/JNB bit,$
             bit = self.code(pc + 1)
             if (op == 0x30) == (not self.getbit(bit)):
@@ -55,6 +66,12 @@ class Sim(CPU51):
             self.step_hw(); n += 1
             if n > max_steps: raise RuntimeError(f"no progress after {n} steps, pc={self.pc:04X}")
         return n
+
+    def uart_one(self):
+        ch = self.xram.get(0x7200 + self.ram[0x36], 0)
+        self.sent.append(ch & 0x7F)
+        self.ram[0x36] = (self.ram[0x36] + 1) & 0x7F
+        self.ram[0x35] -= 1
 
     def uart_drain(self):
         """what the transmit interrupt does with the 7200 ring (count 35h, read index 36h)"""
@@ -137,3 +154,29 @@ class Sim(CPU51):
         self.setr(0, a0 + 2 * nw); self.setr(2, 0)
         self.C = 0
         self.ret()
+
+    # ---------------- serial receive (what the interrupt does with a character, C768..C7B6)
+    def rx(self, data):
+        """feed bytes from the PC: the receiver is locked after boot/wake (27h.5) and the first byte unlocks it
+        and is dropped (the ring is seeded with 96h); then characters go into the ring at 7280 (38h count,
+        39h read index, 3Ah write index).  06h (ACK) and 16h (SYN) have their own meaning.  Parity is assumed good."""
+        for b in data:
+            if self.getbit(0x3D):                                   # 27h.5: locked
+                self.setbit(0x4B, 0)                                # CLR 29h.3
+                self.setbit(0x3D, 0)                                # P3.0 (RXD) high: unlock, drop this byte
+                self.xram[0x7280] = 0x96; self.ram[0x38] = 1; self.ram[0x39] = 0; self.ram[0x3A] = 1
+                continue
+            if b == 0: self.setbit(0x3D, 1); continue
+            c = b & 0x7F
+            if c == 0x06:
+                if self.getbit(0x0F): self.setbit(0x54, 1); self.setbit(0x4B, 1)
+                continue
+            if c == 0x16:
+                self.xram[0x7280] = 0x96; self.ram[0x38] = 1; self.ram[0x39] = 0; self.ram[0x3A] = 1; continue
+            if self.ram[0x38] < 0x3F:
+                self.xram[0x7280 + self.ram[0x3A]] = c
+                self.ram[0x3A] = (self.ram[0x3A] + 1) & 0x3F; self.ram[0x38] += 1
+
+    def rx_async(self, data):
+        """queue bytes that arrive at line speed while the firmware runs (a long command loop reads them as they come)"""
+        self.rx_queue += list(data)

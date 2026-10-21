@@ -35,11 +35,11 @@ Differences that matter:
 
 | Area | Used by |
 |---|---|
-| ROM E800..E97C (E730..E93F with `--raw`) | `--temperature` / `--raw` |
+| ROM E800..E97C (E730..E94A with `--raw`) | `--temperature` / `--raw` |
 | ROM E980..EA38 | `--standby-weigh` (and `--skip-startup`) |
 | ROM F000..F368 | `--comparator` |
 | XRAM 7090..70AF, ring 7682..76FF | `--comparator` |
-| XRAM 70E8..70ED | `--temperature` (T counter 70E8, register save 70E9..70EC, R counter 70ED) |
+| XRAM 70E8..70EE | `--temperature` (T counter 70E8, register save 70E9..70EC, R counter 70ED, long-R counter 70EE) |
 | XRAM 70F0..70F8 | `--standby-weigh` (state, saved poll state, key events, first-wake flag, inhibit counter) |
 
 Still free: about 5 KB of ROM, XRAM 7700..77EF.
@@ -67,8 +67,9 @@ is a first-order low-pass with factor 1/4 per update).
 ## --raw
 
 An addition to the temperature patch (same hook, same gates): an `R` line every pass (or every N) with the
-window sum, the normaliser output, both temperature counts and the window length, in hex; see PROTOCOL.md. The
-patch grows from 381 to 528 bytes and then starts at E730 instead of E800 (it still ends before
+window sum and the normaliser output, and about once a second also both temperature counts and the window
+length, in hex; see PROTOCOL.md. The line is short on purpose: the UART serves about 300 characters/s. The
+patch grows from 381 to 539 bytes and then starts at E730 instead of E800 (it still ends before
 the standby-weigh patch at E980). The hook is in the common pass tail, so the line is also produced with the
 display off.
 
@@ -86,6 +87,18 @@ stage-1 code at 831A->8395 every pass and sets flag 27h.0, which turns the seria
 off. The patch lets stage 1 run with 27h.0 clear, then runs the normal weighing path in the common pass tail
 (8876), hides the key events from it, restores the standby poll's own variables and re-blanks the display. The
 bar-down poll state is untouched.
+
+## --service
+
+`patches/rom_service.py`, code at EB00 (about 290 bytes), XRAM 70EF (arming state) and 70F9 (saved value). The
+dead stock routines are reused: the HEX dump (V10.45 90FD, V10.50 C535) and HEX load (8FCE, C3FC). Hooks: the
+jump-table entry for `X` of the stock host-command interpreter (8F8E table) points to the cassette's handler, which
+matches `D L A B V R` + CRLF by calling the stock matcher (B7EB / B742) and prints replies with the stock print
+routine; and the three bytes at the loader's start (hex_guard, 9080 / C4AE, `75 82 00`) are replaced by a call that
+compares the ID bytes 0E..10 of the incoming image with the chip unless armed with `XB`, and on a mismatch leaves
+through the loader's error exit (902D / C45B, `EL`). `XR` waits for the output buffer to empty and jumps to the
+reset vector. Tested in the simulator on both versions (arming, bad checksum, ID mismatch, override, persistence
+across a simulated power cycle) and on a PM4600 (V10.45) with a full dump, write and restore.
 
 ## --skip-startup
 
