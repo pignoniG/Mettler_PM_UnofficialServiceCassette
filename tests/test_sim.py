@@ -203,9 +203,11 @@ class SimTests(object):                       # run once per firmware version, s
 
     def test_service_version_and_dump(self):
         new = self._service(); s = new()
+        iface = s.xram.get(0x74E3, 0)                                # interface setting byte; the stock dump routine of V10.50 swaps its nibbles
         v = self._talk(s, b'XV\r\n')
         self.assertTrue(v and v[0].startswith(b'XV SVC ' + self.VERSION.encode()), v)
         dump = self._dump(s)
+        self.assertEqual(s.xram.get(0x74E3, 0), iface, 'XD must leave the interface byte 74E3 as it was (else the weight lines stop)')
         self.assertEqual(len(dump), 128)
         # the boot normalises a few user-setting bytes (36h..39h here), everything else is the chip
         diff = [i for i in range(128) if dump[i] != self.eeprom[i]]

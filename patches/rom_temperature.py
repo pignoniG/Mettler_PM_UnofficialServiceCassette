@@ -27,6 +27,7 @@ import profiles
 
 CODE_AT = 0xE800
 CODE_AT_BIG = 0xE730
+CODE_AT_DEBUG = 0xE700                                     # free from here on V10.50 (the debug fields need the room)
 CHECKSUM_AT = 0xF7FF
 TEMP = 0x7047                                              # 24 bit filtered temperature count
 CNT, SAVE, RCNT, RTCNT = 0x70E8, 0x70E9, 0x70ED, 0x70EE
@@ -46,6 +47,7 @@ def encode(m, ops, pc, labels):
     if m == 'LJMP' and isinstance(o[0], str): return asm51.encode(m, ops, pc, labels)
     if m in ('JB', 'JNB'): return [0x20 if m == 'JB' else 0x30, o[0], rel(o[1], 3)]
     if m == 'LBL': return []                               # label only, no code
+    if m == 'MOV' and o == ['A', '@R0']: return [0xE6]
     if m == 'SWAP': return [0xC4]
     if m == 'DA': return [0xD4]
     if m == 'PUSH': return [0xC0, o[0]]
@@ -65,7 +67,7 @@ def assemble(org, prog):
     return bytes(code), labels
 
 
-def program(every, putc, temp_routine, raw_every=0, ext_every=6, window_reg=0x32, raw_xram=0x749A):
+def program(every, putc, temp_routine, raw_every=0, ext_every=6, window_reg=0x32, raw_xram=0x749A, debug=False):
     """every: T line every N passes (0 = none); raw_every: R line every N passes (0 = none); every ext_every-th
     R line also carries the temperature counts and the window length"""
     P = []
@@ -80,7 +82,7 @@ def program(every, putc, temp_routine, raw_every=0, ext_every=6, window_reg=0x32
     dptr(0x7601); I('MOVX', 'A', '@DPTR'); I('ANL', 'A', '#192'); I('CJNE', 'A', '#192', 'DONE')   # cONT only
     for bit in (0x38, 0x7D, 0x78, 0x4B):                    # 27h.0 2Fh.5 2Fh.0 29h.3: output off / busy
         I('JB', bit, 'DONE')
-    I('MOV', 'A', 0x35); I('CLR', 'C'); I('SUBB', 'A', '#64'); I('JNC', 'DONE')   # output buffer nearly full
+    I('MOV', 'A', 0x35); I('CLR', 'C'); I('SUBB', 'A', '#40'); I('JNC', 'DONE')   # output buffer filling up: the weight lines come first
     I('LJMP', 'BODY')
     L('DONE', 'RET')
     L('BODY', 'PUSH', 0xF0); I('PUSH', PSW)                         # B, PSW
@@ -134,6 +136,14 @@ def program(every, putc, temp_routine, raw_every=0, ext_every=6, window_reg=0x32
         for a in (TEMP + 2, TEMP + 1, TEMP): hexbyte_x(a)
         put(0x20)
         hexbyte_r(window_reg)
+        if debug:                       # ' G' + the flag bytes 20h..2Fh and the output-ring variables 35h..3Ah, 74E3, 7601 (hex)
+            put(0x20); put(ord('G'))
+            I('MOV', 'R0', '#32'); I('MOV', 'R1', '#16')
+            L('GL1', 'MOV', 'A', '@R0'); I('LCALL', 'PUTHEX'); I('INC', 'R0'); I('DJNZ', 'R1', 'GL1')
+            put(0x20)
+            I('MOV', 'R0', '#53'); I('MOV', 'R1', '#6')
+            L('GL2', 'MOV', 'A', '@R0'); I('LCALL', 'PUTHEX'); I('INC', 'R0'); I('DJNZ', 'R1', 'GL2')
+            put(0x20); hexbyte_x(0x74E3); hexbyte_x(0x7601)
         L('NOEXT', 'LBL')
         put(0x0D); put(0x0A)
         I('LJMP', 'AFTERRAW')
@@ -150,24 +160,27 @@ def program(every, putc, temp_routine, raw_every=0, ext_every=6, window_reg=0x32
     return P
 
 
-def build(img, every=None, profile=None, raw=False, raw_every=None, ext_every=None):
+def build(img, every=None, profile=None, raw=False, raw_every=None, ext_every=None, debug=False):
     """every: a T line every N passes, 0 for none; the default is about 10 s (62 passes of 0.16 s, 75 of 0.133 s).
-    raw: also an R line every raw_every passes (default 1).  Returns (image, code, address of the code)."""
+    raw: also an R line every raw_every passes (default: 1 on V10.45, 2 on V10.50, see profiles.py).  Returns (image, code, address of the code)."""
     img = bytearray(img)
     if len(img) != 0x8000: raise ValueError("expected a 32 KiB ROM image")
     if sum(img) & 0xFF: raise ValueError("ROM checksum of the input is already wrong")
     P = profiles.get(bytes(img), profile)
     if every is None: every = round(10 * 150 / P['window'])
-    if raw and raw_every is None: raw_every = 1
+    if raw and raw_every is None: raw_every = P['raw_every']
     if ext_every is None: ext_every = round(150 / P['window'])                 # about once a second
     hook = P['temp_call']
     if img[hook - 0x8000:hook - 0x8000 + 3] != P['temp_call_old']:
         raise ValueError(f"unexpected bytes at {hook:04X}: not the stock image of this version")
-    prog = program(every, P['putc'], P['temp_routine'], raw_every or 0, ext_every)
+    prog = program(every, P['putc'], P['temp_routine'], raw_every or 0, ext_every, debug=debug)
     code_at = CODE_AT                                          # E800 for the T line alone: E800..E97F
     code, lab = assemble(code_at, prog)
     if len(code) > 0x180:                                      # the R line needs more room: start earlier, E730..E97F
         code_at = CODE_AT_BIG
+        code, lab = assemble(code_at, prog)
+    if code_at + len(code) > 0xE980 and debug:
+        code_at = CODE_AT_DEBUG
         code, lab = assemble(code_at, prog)
     if code_at + len(code) > 0xE980:
         raise ValueError("code does not fit before the standby-weigh patch at E980")
