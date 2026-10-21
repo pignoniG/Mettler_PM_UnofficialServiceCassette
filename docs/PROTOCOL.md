@@ -47,7 +47,14 @@ receiver lock), the dump takes about 1 s, and the firmware rewrites bytes 0x36 a
 the whole dump and a restore of the original worked, and a changed byte 0x7F was read back correctly. Refusals
 checked: `XL` unarmed gives `EL`; with `XA`, an image with a bad cell checksum or a different ID gives `XL` and then
 `EL` after the records, and a dump afterwards was identical to the one before. `XR` answers `XR` and the balance restarts
-(wake it with the bar). Not yet tried on the balance: `XB`.
+(wake it with the bar). `XB` checked too: an image with a changed ID (valid checksums) was written with the override, read back, and the original
+written back the same way (a plain `XA` load would have refused it). Not tried on a real balance: V10.50.
+
+## Stock commands useful for a PC tool
+
+`T` tares once the reading is stable (like the tare bar) and `TI` tares immediately; the balance sends no answer,
+the weight line returning to zero is the confirmation (`T` checked on the PM4600). There is no zero command (`Z`
+answers `ES`). `S` and `D` give the weight, as in continuous mode. The calibration command `CA` is not to be sent.
 
 ## Boot guard (planned)
 
