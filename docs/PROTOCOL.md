@@ -44,7 +44,10 @@ the `-OFF-` standby display; its serial output is silent until the control bar w
 
 Notes from the real balance (PM4600, V10.45): the balance answers `ES` to the first newline after boot or wake (the
 receiver lock), the dump takes about 1 s, and the firmware rewrites bytes 0x36 and 0x39 at every restart. A write of
-the whole dump and a restore of the original worked, and a changed byte 0x7F was read back correctly.
+the whole dump and a restore of the original worked, and a changed byte 0x7F was read back correctly. Refusals
+checked: `XL` unarmed gives `EL`; with `XA`, an image with a bad cell checksum or a different ID gives `XL` and then
+`EL` after the records, and a dump afterwards was identical to the one before. `XR` answers `XR` and the balance restarts
+(wake it with the bar). Not yet tried on the balance: `XB`.
 
 ## Boot guard (planned)
 
