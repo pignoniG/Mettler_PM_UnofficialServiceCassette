@@ -45,21 +45,23 @@ def run(rom, eeprom_file, dt=5000, loads=(0, 10, 100, 500, 1000, 2000, 3000, 400
     x = bytearray(pm.load(eeprom_file)[0]); x[0x01] |= 0xC0
     s = fwsim.Sim(rom, bytes(x)); s.boot()
     temp = pm.g24(x, 0x46) + dt
-    RL = re.compile(rb'^R ([0-9A-F]{8}) ([0-9A-F]{6}) ([0-9A-F]{6}) ([0-9A-F]{6}) ([0-9A-F]{2})$')
+    RL = re.compile(rb'^R ([0-9A-F]{8}) ([0-9A-F]{6})(?: ([0-9A-F]{6}) ([0-9A-F]{6}) ([0-9A-F]{2}))?$')    # the long form every ~1 s
     WL = re.compile(rb'^S +(-?\d+\.\d+) g$')
     for _ in range(130): s.one_pass(s_value=s.window_sum(raw0), sw=0x80, temp=temp); s.sent.clear()
     rows = []
     for g in loads:
-        last_r = last_w = None
+        last_r = last_w = None; tfilt = None
         for _ in range(70):
             s.one_pass(s_value=s.window_sum(raw0 + raw_per_g * g), sw=0x80, temp=temp)
             for l in bytes(s.sent).replace(b'\x26', b'').replace(b'\x00', b'').split(b'\r\n'):
                 m = RL.match(l)
-                if m: last_r = [int(v, 16) for v in m.groups()]
+                if m:
+                    last_r = [int(m.group(1), 16), int(m.group(2), 16)]
+                    if m.group(4): tfilt = int(m.group(4), 16)
                 m = WL.match(l)
                 if m: last_w = float(m.group(1))
             s.sent.clear()
-        rows.append((g, last_r, last_w))
+        rows.append((g, [last_r[0], last_r[1], None, tfilt], last_w))
     base = model_weight(x, pm.g24, rows[0][1][1], rows[0][1][3])
     return [(g, r[1], r[3], (w - rows[0][2]) * 1000 if w is not None else None,
              model_weight(x, pm.g24, r[1], r[3]) - base) for g, r, w in rows]

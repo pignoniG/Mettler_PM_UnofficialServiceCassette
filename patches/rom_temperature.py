@@ -29,7 +29,7 @@ CODE_AT = 0xE800
 CODE_AT_BIG = 0xE730
 CHECKSUM_AT = 0xF7FF
 TEMP = 0x7047                                              # 24 bit filtered temperature count
-CNT, SAVE, RCNT = 0x70E8, 0x70E9, 0x70ED
+CNT, SAVE, RCNT, RTCNT = 0x70E8, 0x70E9, 0x70ED, 0x70EE
 PSW = 0xD0
 
 
@@ -65,8 +65,9 @@ def assemble(org, prog):
     return bytes(code), labels
 
 
-def program(every, putc, temp_routine, raw_every=0, window_reg=0x32, raw_xram=0x749A):
-    """every: T line every N passes (0 = none); raw_every: R line every N passes (0 = none)"""
+def program(every, putc, temp_routine, raw_every=0, ext_every=6, window_reg=0x32, raw_xram=0x749A):
+    """every: T line every N passes (0 = none); raw_every: R line every N passes (0 = none); every ext_every-th
+    R line also carries the temperature counts and the window length"""
     P = []
     def I(*ins): P.append((None,) + ins)
     def L(label, *ins): P.append((label,) + ins)
@@ -116,19 +117,24 @@ def program(every, putc, temp_routine, raw_every=0, window_reg=0x32, raw_xram=0x
     put(0x0D); put(0x0A)
     I('LJMP', 'EXIT')
     if raw_every:
-        # R wwwwwwww rrrrrr tttttt ffffff nn : window sum (7045..7042), raw value after the normaliser (749C..749A),
-        # unfiltered temperature (16h 15h 14h), filtered temperature (7049..7047), window length (32h); hex
+        # R wwwwwwww rrrrrr [tttttt ffffff nn] : window sum (7045..7042), raw value after the normaliser (749C..749A) and,
+        # every ext_every-th line, the unfiltered temperature (16h 15h 14h), the filtered temperature (7049..7047) and
+        # the window length (32h); hex.  Kept short on purpose: the balance's UART service is about 300 characters/s, and
+        # a longer line every pass makes the passes (and the A/D windows) slower than 0.16 s.
         L('DORAW', 'LBL')
         put(ord('R')); put(0x20)
         for a in (0x7045, 0x7044, 0x7043, 0x7042): hexbyte_x(a)
         put(0x20)
         for a in (raw_xram + 2, raw_xram + 1, raw_xram): hexbyte_x(a)
+        dptr(RTCNT); I('MOVX', 'A', '@DPTR'); I('INC', 'A'); I('MOVX', '@DPTR', 'A'); I('CJNE', 'A', '#%d' % ext_every, 'NOEXT')
+        I('CLR', 'A'); I('MOVX', '@DPTR', 'A')
         put(0x20)
         for a in (0x16, 0x15, 0x14): hexbyte_r(a)
         put(0x20)
         for a in (TEMP + 2, TEMP + 1, TEMP): hexbyte_x(a)
         put(0x20)
         hexbyte_r(window_reg)
+        L('NOEXT', 'LBL')
         put(0x0D); put(0x0A)
         I('LJMP', 'AFTERRAW')
     L('EXIT', 'LBL')
@@ -144,7 +150,7 @@ def program(every, putc, temp_routine, raw_every=0, window_reg=0x32, raw_xram=0x
     return P
 
 
-def build(img, every=None, profile=None, raw=False, raw_every=None):
+def build(img, every=None, profile=None, raw=False, raw_every=None, ext_every=None):
     """every: a T line every N passes, 0 for none; the default is about 10 s (62 passes of 0.16 s, 75 of 0.133 s).
     raw: also an R line every raw_every passes (default 1).  Returns (image, code, address of the code)."""
     img = bytearray(img)
@@ -153,10 +159,11 @@ def build(img, every=None, profile=None, raw=False, raw_every=None):
     P = profiles.get(bytes(img), profile)
     if every is None: every = round(10 * 150 / P['window'])
     if raw and raw_every is None: raw_every = 1
+    if ext_every is None: ext_every = round(150 / P['window'])                 # about once a second
     hook = P['temp_call']
     if img[hook - 0x8000:hook - 0x8000 + 3] != P['temp_call_old']:
         raise ValueError(f"unexpected bytes at {hook:04X}: not the stock image of this version")
-    prog = program(every, P['putc'], P['temp_routine'], raw_every or 0)
+    prog = program(every, P['putc'], P['temp_routine'], raw_every or 0, ext_every)
     code_at = CODE_AT                                          # E800 for the T line alone: E800..E97F
     code, lab = assemble(code_at, prog)
     if len(code) > 0x180:                                      # the R line needs more room: start earlier, E730..E97F
@@ -181,10 +188,11 @@ def main():
     p.add_argument('--every', type=int, help='send a T line every N weighing passes (default: about every 10 s; 0 = none)')
     p.add_argument('--raw', action='store_true', help='also send an R line with the raw A/D and temperature counts')
     p.add_argument('--raw-every', type=int, help='R line every N passes (default 1)')
+    p.add_argument('--raw-ext-every', type=int, help='every N-th R line also carries the temperature counts and window length (default: about once a second)')
     p.add_argument('--version', choices=sorted(profiles.PROFILES), help='firmware version (default: detect)')
     a = p.parse_args()
     assert a.every is None or 0 <= a.every <= 255
-    out, code, at = build(open(a.inp, 'rb').read(), a.every, a.version, a.raw, a.raw_every)
+    out, code, at = build(open(a.inp, 'rb').read(), a.every, a.version, a.raw, a.raw_every, a.raw_ext_every)
     open(a.out, 'wb').write(out)
     print(f"patch {at:04X}-{at + len(code) - 1:04X} ({len(code)} bytes)")
     print(f"written {a.out} (ROM checksum OK)")

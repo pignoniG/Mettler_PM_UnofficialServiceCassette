@@ -12,6 +12,8 @@ the same in all versions and are not listed here.
   temp_*          the call of the temperature routine in the common pass tail
   putc            the firmware's character output routine
   bar_up .. weigh the standby / dispatch / tail places of the standby-weighing patch
+  cmd_*, hex_*, reset   the stock host-command interpreter (matcher, inline printer, end of a command, `ES` reply, jump-table
+                  entry of the command letter X) and the stock EEPROM Intel-HEX dump / load routines the service patch calls
   main_wait .. timer_test  only for the simulator
 """
 PROFILES = {
@@ -27,6 +29,8 @@ PROFILES = {
         tail=0x8876, tail_old=bytes([0x12, 0xC4, 0x64, 0xC2, 0x0A, 0x02, 0x82, 0x78]), flush=0xC464, tail_cont=0x8278,
         wake=0x836E, wake_old=bytes([0xD2, 0x4D, 0xC2, 0x03, 0x02, 0x84, 0x16]), wake_exit=0x8416, start_init=0x8AA3,
         cd93=0xCD93, bb2b=0xBB2B,
+        cmd_match=0xB7EB, cmd_print=0xCD82, cmd_done=0x8F0F, cmd_es=0x8F3B, cmd_table_x=0x8FBE,
+        hex_dump=0x90FD, hex_load=0x8FCE, hex_guard=0x9080, hex_guard_old=bytes([0x75, 0x82, 0x00]), hex_error=0x902D, hex_reset_wait=0x90A1, reset=0x8200,
         main_wait=0x82F3, ee_load=0xCD98, ee_write=0xCDB7, timer_test=0xCD2D),
     '10.50': dict(
         window=20, signature={0x8020: b'100'},
@@ -40,6 +44,8 @@ PROFILES = {
         tail=0x886A, tail_old=bytes([0x12, 0xC3, 0xC7, 0xC2, 0x0A, 0x02, 0x82, 0x72]), flush=0xC3C7, tail_cont=0x8272,
         wake=0x8362, wake_old=bytes([0xD2, 0x4D, 0xC2, 0x03, 0x02, 0x84, 0x0A]), wake_exit=0x840A, start_init=0x8AB2,
         cd93=0xCC9F, bb2b=0xBA8E,
+        cmd_match=0xB742, cmd_print=0xCC8E, cmd_done=0x8F1F, cmd_es=0x8F4B, cmd_table_x=0x8FD4,
+        hex_dump=0xC535, hex_load=0xC3FC, hex_guard=0xC4AE, hex_guard_old=bytes([0x75, 0x82, 0x00]), hex_error=0xC45B, hex_reset_wait=0xC4CF, reset=0x8200,
         main_wait=0x82E6, ee_load=0xCCA4, ee_write=0xCCC3, timer_test=0xCC3E),
 }
 

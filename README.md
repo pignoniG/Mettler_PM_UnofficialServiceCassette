@@ -21,25 +21,41 @@ The PC side lives in [Mettler_PM_UnofficialServiceTool](https://github.com/pigno
 |---|---|---|
 | `--comparator` | long A/D averaging at the normal display speed (mass-comparator style: ring buffer, newest-half average, longer calibration timeouts) | running on a PM4600 (V10.45) |
 | `--temperature` | extra line `T 297904` every ~10 s: the balance's filtered temperature count (the number the service keypad shows) | running on a PM4600 |
-| `--raw` | an `R` line every pass: the 32-bit A/D window sum, the raw value that feeds the correction, the unfiltered and filtered temperature counts and the window length (hex), see [docs/PROTOCOL.md](docs/PROTOCOL.md) | simulator-tested, not yet on a balance |
+| `--raw` | an `R` line every pass: the 32-bit A/D window sum and the raw value that feeds the correction, and about once a second the temperature counts and the window length (hex), see [docs/PROTOCOL.md](docs/PROTOCOL.md) | on a PM4600 (V10.45): works, and the correction model matched the displayed weight of a 1 kg step to a few mg; the first, longer line format was too slow for the UART, this one is compact |
 | `--standby-weigh` | with the display off (control bar up) the balance keeps weighing and sending its serial output; the bar-down poll and the configuration entry behave as stock | running on a PM4600 (overnight logs) |
+| `--service` | EEPROM read and write over serial: `XV` version and ID, `XD` dump, `XA`/`XB` arm, `XL` load, `XR` restart, with checksum, ID and arming guards (`tools/svc_client.py` is the PC side) | dump, write and restore of the whole EEPROM tested on a PM4600 (V10.45) |
 | `--skip-startup` | wake from standby without the display test, version number and switch-on tare (the first wake after power-on keeps them) | tested in the simulator, being tested on the balance |
 
 **Firmware versions.** V10.45 is what the patches were developed and tested on (PM4600). V10.50 is supported through an address table (`patches/profiles.py`): every hook site and firmware routine was found by instruction-pattern matching, the patched images build and pass the same simulator tests, but **V10.50 has not been tried on a real balance yet**. `build.py` detects the version from the image.
 
-Details, hook addresses and the memory map are in [docs/PATCHES.md](docs/PATCHES.md). The planned command
-module (EEPROM read/write, raw A/D line, boot guard for a bad EEPROM) is described in
-[docs/PROTOCOL.md](docs/PROTOCOL.md); it is not implemented yet.
+Details, hook addresses and the memory map are in [docs/PATCHES.md](docs/PATCHES.md). The serial protocol (output
+lines and the service commands) is in [docs/PROTOCOL.md](docs/PROTOCOL.md). The boot guard for a corrupt EEPROM is
+still planned.
 
 ## Use
 
 ```bash
-python3 build.py V10.45.bin out.bin --comparator --temperature --raw --standby-weigh --skip-startup
+python3 build.py V10.45.bin out.bin --comparator --temperature --raw --standby-weigh --skip-startup --service
 ```
 
 `V10.45.bin` (or a V10.50 image) is your unmodified 32 KiB image. Burn `out.bin` into a 27C256 and put it in the cassette. The
 serial interface is configured on the balance (configuration file, sector I-FACE: continuous transmission,
 9600 baud, even parity, Pause 0); wiring and settings are in the characterisation tool's README.
+
+### Reading and writing the EEPROM
+
+With a `--service` image in the cassette and the balance connected (RS-232 receive wire connected as well):
+
+```bash
+python3 tools/svc_client.py version
+python3 tools/svc_client.py dump backup.BIN          # programmer byte order, like the EEPROM tool's dumps
+python3 tools/svc_client.py load new.BIN             # checks the file, arms, writes; add --override-id for a board swap or blank chip
+```
+
+`load` replaces the whole EEPROM including the user calibration: dump first. After a successful write the balance
+restarts into the `-OFF-` standby display and is silent: press the control bar, then `dump` to verify. The firmware
+rewrites a few bytes itself on every restart (0x36 and 0x39, their sum stays constant), so a dump after a write is
+not bit-identical in those two bytes. Needs pyserial. Never send `CA` (stock calibration command).
 
 ## Simulator
 
@@ -61,9 +77,10 @@ small 8051 disassembler.
    the displayed weight.~~ Done in the simulator: the R line works on both versions and `tools/model_check.py` finds the
    model of `EEPROM_MAP.md` section 3 identical to the firmware (0.0 mg at 0..4000 g and three temperatures). Still to do:
    the same check against a log from a real balance.
-2. Command module: `~V` version/ID, `~R` EEPROM read.
-3. `~W` write with arming, whole-image checksum check, ID guard, restart; boot guard for a corrupt EEPROM
-   (recovery mode).
+2. ~~Command module: version/ID, EEPROM read.~~ Done (`--service`, `XV`, `XD`).
+3. ~~Write with arming, checksum check, ID guard, restart.~~ Done (`XA`/`XB`/`XL`/`XR`), tested on a PM4600 with a
+   write and restore of the chip. Still to do: the refusal paths and `XR` on a real balance, V10.50 on a real balance;
+   boot guard for a corrupt EEPROM (recovery mode).
 4. PC-side service procedures (sticker check, rebuild, linearity, calibration, TC fit).
 
 ## Licence

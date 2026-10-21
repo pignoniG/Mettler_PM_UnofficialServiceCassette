@@ -14,7 +14,7 @@ import os, sys, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path[:0] = [os.path.join(ROOT, 'sim'), os.path.join(ROOT, 'patches'), ROOT]
-import fwsim, profiles, rom_comparator, rom_temperature, rom_standby_weigh
+import fwsim, profiles, rom_comparator, rom_temperature, rom_standby_weigh, rom_service
 
 EEP = os.environ.get('PM_EEPROM')
 
@@ -120,20 +120,26 @@ class SimTests(object):                       # run once per firmware version, s
     def test_raw_line_reports_what_the_interrupt_left(self):
         import re
         rom = rom_temperature.build(self.stock, 0, None, True, 1)[0]
-        s = self.sim(rom); w = s.window
-        RL = re.compile(rb'^R ([0-9A-F]{8}) ([0-9A-F]{6}) ([0-9A-F]{6}) ([0-9A-F]{6}) ([0-9A-F]{2})$')
+        s = self.sim(rom); w = s.window; ext = round(150 / w)
+        RL = re.compile(rb'^R ([0-9A-F]{8}) ([0-9A-F]{6})(?: ([0-9A-F]{6}) ([0-9A-F]{6}) ([0-9A-F]{2}))?$')
         for _ in range(130): s.one_pass(s_value=s.window_sum(self.x0), sw=0x80, temp=300000); s.sent.clear()
-        got = []
-        for i in range(30):
+        got = []; per_pass = []
+        for i in range(36):
             s.one_pass(s_value=s.window_sum(self.x0 + 1548 * 10), sw=0x80, temp=300000 + i)
-            got += [[int(g, 16) for g in m.groups()] for m in map(RL.match, lines(s.sent)) if m]; s.sent.clear()
-        self.assertEqual(len(got), 30)                                   # one R line per pass
-        wsum, raw, tun, tfi, win = got[-1]
-        self.assertEqual(wsum, s.window_sum(self.x0 + 1548 * 10) >> 8)   # the 32-bit window sum
-        self.assertEqual(raw, (wsum * (240 // w)) >> 8)                  # the normaliser's output
-        self.assertEqual(tun, 300029)                                    # unfiltered temperature
-        self.assertTrue(tun - 8 < tfi <= tun)                            # filtered temperature follows it
+            ls = lines(s.sent); s.sent.clear()
+            ms = [RL.match(l) for l in ls if l.startswith(b'R')]
+            per_pass.append(len(ms)); got += ms
+        self.assertEqual(per_pass, [1] * 36)                              # exactly one R line per pass
+        longs = [m for m in got if m.group(3)]
+        self.assertEqual(len(longs), 36 // ext)                           # the temperature fields every ext-th line
+        wsum, raw = int(got[-1].group(1), 16), int(got[-1].group(2), 16)
+        self.assertEqual(wsum, s.window_sum(self.x0 + 1548 * 10) >> 8)    # the 32-bit window sum
+        self.assertEqual(raw, (wsum * (240 // w)) >> 8)                   # the normaliser's output
+        tun, tfi, win = (int(longs[-1].group(i), 16) for i in (3, 4, 5))
+        self.assertTrue(300000 <= tun < 300036)                           # unfiltered temperature
+        self.assertTrue(tun - 12 < tfi <= tun)                            # filtered temperature follows it
         self.assertEqual(win, w)
+        self.assertLessEqual(max(len(l) for l in ls), 40)                 # lines stay short: the UART does ~300 characters/s
 
     def test_model_matches_the_firmware(self):
         sys.path.insert(0, os.path.join(ROOT, 'tools'))
@@ -145,6 +151,83 @@ class SimTests(object):                       # run once per firmware version, s
             for g, raw, tf, shown, pred in rows:
                 self.assertIsNotNone(shown, (dt, g))
                 self.assertLessEqual(abs(shown - pred), 1.0, (dt, g))
+
+    # ---- service commands over the serial line (stock Intel-HEX dump and load behind XD / XL)
+    def _service(self):
+        rom = rom_service.build(self.stock)[0]
+        def new(chip=None):
+            s = fwsim.Sim(rom, chip or self.eeprom); s.boot()
+            for _ in range(130): s.one_pass(s_value=s.window_sum(self.x0), sw=0x80, temp=300000); s.sent.clear()
+            s.rx(b'\n')                                              # unlock the receiver (this byte is dropped)
+            for _ in range(14): s.one_pass(s_value=s.window_sum(self.x0), sw=0x80, temp=300000); s.sent.clear()
+            return s
+        return new
+
+    @staticmethod
+    def _records(img):
+        def rec(a, d):
+            b = bytes([len(d), a >> 8, a & 255, 0]) + bytes(d)
+            return (':' + b.hex().upper() + '%02X' % ((-sum(b)) & 255) + '\r\n').encode()
+        return b''.join(rec(a, img[a:a + 8]) for a in range(0, 128, 8)) + b':00000001FF\r\n'
+
+    @staticmethod
+    def _fix(img):
+        img = bytearray(img)
+        for lo, hi in ((0x04, 0x2D), (0x2E, 0x31), (0x3E, 0x67)):
+            img[hi] = 0; img[hi] = (-(0xA6 + sum(img[lo:hi]))) & 255
+        return bytes(img)
+
+    def _talk(self, s, cmd, passes=14, feed=b'', stop=None):
+        s.sent.clear(); s.rx(cmd)
+        if feed: s.rx_async(feed)
+        out = b''; chip0 = bytes(s.eeprom)
+        for _ in range(passes):
+            try:
+                s.one_pass(s_value=s.window_sum(self.x0), sw=0x80, temp=300000, max_steps=3_000_000)
+            except RuntimeError:                                       # after a successful load the stock code restarts the
+                if bytes(s.eeprom) != chip0: break                     # firmware; the simulator does not model what follows
+                raise
+            out += bytes(s.sent); s.sent.clear()
+            if stop and not s.rx_queue and stop(out, s): break
+        txt = out.replace(b'\x26', b'').replace(b'\x00', b'').replace(b'\x4b', b'')           # pause characters
+        return [l for l in txt.split(b'\r\n') if l and not l.startswith(b'S ')]
+
+    def _dump(self, s):
+        img = bytearray()
+        for l in self._talk(s, b'XD\r\n'):
+            if l.startswith(b':') and l != b':00000001FF': img += bytes.fromhex(l[9:25].decode())
+        return bytes(img)
+
+    def _load(self, s, img):
+        return self._talk(s, b'XL\r\n', 14, self._records(img), lambda o, s_: b'EL' in o or s_.eeprom != self.eeprom)
+
+    def test_service_version_and_dump(self):
+        new = self._service(); s = new()
+        v = self._talk(s, b'XV\r\n')
+        self.assertTrue(v and v[0].startswith(b'XV SVC ' + self.VERSION.encode()), v)
+        dump = self._dump(s)
+        self.assertEqual(len(dump), 128)
+        # the boot normalises a few user-setting bytes (36h..39h here), everything else is the chip
+        diff = [i for i in range(128) if dump[i] != self.eeprom[i]]
+        self.assertTrue(set(diff) <= {0x00, 0x01, 0x02, 0x03, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39}, diff)
+        self.assertEqual(self._talk(new(), b'XQ\r\n'), [b'ES'])
+
+    def test_service_write_needs_arming_checksums_and_id(self):
+        new = self._service()
+        s = new(); img = self._dump(s)
+        mod = bytearray(img); mod[0x20] ^= 1; mod = self._fix(mod)
+        # not armed: refused, chip untouched
+        s = new(); self.assertEqual(self._load(s, mod)[:1], [b'EL']); self.assertEqual(s.eeprom, self.eeprom)
+        # armed, valid: written
+        s = new(); self.assertEqual(self._talk(s, b'XA\r\n'), [b'XA'])
+        self._load(s, mod); self.assertEqual(s.eeprom[0x20], mod[0x20]); self.assertNotEqual(s.eeprom[0x20], self.eeprom[0x20])
+        # armed, bad block checksum: refused
+        bad = bytearray(mod); bad[0x40] ^= 1
+        s = new(); self._talk(s, b'XA\r\n'); self.assertEqual(self._load(s, bad)[-1:], [b'EL']); self.assertEqual(s.eeprom, self.eeprom)
+        # armed, another balance's ID: refused with XA, accepted with XB
+        other = bytearray(mod); other[0x0E] ^= 0x55; other = self._fix(other)
+        s = new(); self._talk(s, b'XA\r\n'); self.assertEqual(self._load(s, other)[-1:], [b'EL']); self.assertEqual(s.eeprom, self.eeprom)
+        s = new(); self._talk(s, b'XB\r\n'); self._load(s, other); self.assertEqual(s.eeprom[0x0E], other[0x0E])
 
 
 def _skip(env):
